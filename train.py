@@ -194,6 +194,15 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Dense feature compression.
+    parser.add_argument('--dense_log_transform', action='store_true', default=True,
+                        help='Apply signed log1p to user/item dense features '
+                             'before projection. Compresses raw counters so '
+                             'they do not dominate already-normalized columns.')
+    parser.add_argument('--no_dense_log_transform', dest='dense_log_transform',
+                        action='store_false',
+                        help='Disable signed log1p on dense features')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +310,7 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "dense_log_transform": args.dense_log_transform,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
