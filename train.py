@@ -38,6 +38,36 @@ def build_feature_specs(
     return specs
 
 
+def _resolve_dense_fid_offsets(
+    pcvr_dataset, fids_str: str, label: str,
+) -> List[Tuple[int, int]]:
+    """Translate a comma-separated list of user_dense fids (e.g. "61")
+    into the corresponding ``(offset, length)`` slices inside the flat
+    user_dense feature vector. Unknown fids are silently skipped so that
+    schema mismatches at submission time degrade gracefully (the path
+    becomes a no-op).
+    """
+    if not fids_str:
+        return []
+    try:
+        fids = [int(x.strip()) for x in fids_str.split(',') if x.strip()]
+    except ValueError:
+        logging.warning(f"Could not parse {label}={fids_str!r}, disabling path")
+        return []
+    offsets: List[Tuple[int, int]] = []
+    schema = pcvr_dataset.user_dense_schema
+    for fid in fids:
+        if fid in schema._fid_to_entry:
+            offset, length = schema.get_offset_length(fid)
+            offsets.append((offset, length))
+        else:
+            logging.warning(f"{label}={fid} not found in user_dense_schema; skipping")
+    if offsets:
+        logging.info(f"{label} resolved: fids={fids} -> slices={offsets} "
+                     f"(total {sum(l for _, l in offsets)} dim)")
+    return offsets
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="PCVRHyFormer Training")
 
@@ -194,6 +224,22 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Paper-faithful pretrained user-embedding integration paths.
+    # Each user_dense fid honors its source paper's recommended recipe:
+    #   - SUM (Meta) -> additive residual (default fid 61).
+    #   - LFM4Ads (Tencent) -> multiplicative gating (default fid 87).
+    parser.add_argument('--additive_dense_fids', type=str, default='61',
+                        help='Comma-separated user_dense fids whose values are '
+                             'projected through an adapter and ADDED as a '
+                             'residual to the pooled output (SUM-style). '
+                             'Default 61 = Meta SUM embedding in this dataset.')
+    parser.add_argument('--gating_dense_fids', type=str, default='87',
+                        help='Comma-separated user_dense fids whose values are '
+                             'projected through an adapter, passed through '
+                             '2*sigmoid, and MULTIPLIED with the pooled output '
+                             '(LFM4Ads-style). Default 87 = Tencent LFM4Ads '
+                             'embedding in this dataset.')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +347,10 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "additive_dense_offsets": _resolve_dense_fid_offsets(
+            pcvr_dataset, args.additive_dense_fids, '--additive_dense_fids'),
+        "gating_dense_offsets": _resolve_dense_fid_offsets(
+            pcvr_dataset, args.gating_dense_fids, '--gating_dense_fids'),
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
