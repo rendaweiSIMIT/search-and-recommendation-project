@@ -20,6 +20,7 @@ import torch
 
 from utils import set_seed, EarlyStopping, create_logger
 from dataset import FeatureSchema, get_pcvr_data, NUM_TIME_BUCKETS
+from data_stats import log_data_stats
 from model import PCVRHyFormer
 from trainer import PCVRHyFormerRankingTrainer
 
@@ -194,6 +195,21 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Data-stats logging at training-time start.
+    parser.add_argument('--data_stats', action='store_true', default=True,
+                        help='Sample the head of the input parquet files and '
+                             'log per-column statistics (null rate, value '
+                             'range, vocab estimate, sequence sortedness, '
+                             'pretrained dense presence) before training '
+                             'starts. Helps diagnose schema / distribution '
+                             'shifts on the platform vs. the local demo.')
+    parser.add_argument('--no_data_stats', dest='data_stats', action='store_false',
+                        help='Skip the data-stats logging pass')
+    parser.add_argument('--data_stats_rows', type=int, default=100_000,
+                        help='Maximum rows to read for data-stats sampling. '
+                             'Reads from the head of the first parquet file '
+                             '(by row group). Larger = slower but more accurate.')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -229,6 +245,18 @@ def main() -> None:
 
     if not os.path.exists(schema_path):
         raise FileNotFoundError(f"schema file not found at {schema_path}")
+
+    # ---- Data stats ----
+    # Sample a head of the parquet files and log per-column statistics, so
+    # the platform-side training log surfaces how the full dataset compares
+    # to the local 1k-row demo (vocab sizes, sequence lengths, null rates,
+    # value scales, sequence sortedness, presence of pretrained dense
+    # embeddings, ...). Disable with --no_data_stats if too verbose.
+    if args.data_stats:
+        try:
+            log_data_stats(args.data_dir, max_rows=args.data_stats_rows)
+        except Exception as e:
+            logging.warning(f"log_data_stats failed: {e}; continuing")
 
     # Parse per-domain sequence-length overrides.
     seq_max_lens = {}
