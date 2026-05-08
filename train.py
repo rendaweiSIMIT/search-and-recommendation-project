@@ -38,6 +38,40 @@ def build_feature_specs(
     return specs
 
 
+def _resolve_pretrained_offsets(
+    pcvr_dataset, pretrained_dense_fids_str: str,
+) -> List[Tuple[int, int]]:
+    """Translate a comma-separated list of user_dense fids (e.g. "61,87")
+    into the corresponding ``(offset, length)`` slices inside the flat
+    user_dense feature vector. Unknown fids are silently skipped so that
+    schema mismatches at submission time degrade gracefully (the residual
+    path becomes a no-op).
+    """
+    if not pretrained_dense_fids_str:
+        return []
+    try:
+        fids = [int(x.strip()) for x in pretrained_dense_fids_str.split(',')
+                if x.strip()]
+    except ValueError:
+        logging.warning(f"Could not parse --pretrained_dense_fids="
+                        f"{pretrained_dense_fids_str!r}, disabling residual")
+        return []
+    offsets: List[Tuple[int, int]] = []
+    schema = pcvr_dataset.user_dense_schema
+    for fid in fids:
+        if fid in schema._fid_to_entry:
+            offset, length = schema.get_offset_length(fid)
+            offsets.append((offset, length))
+        else:
+            logging.warning(f"--pretrained_dense_fids={fid} not found in "
+                            f"user_dense_schema; skipping")
+    if offsets:
+        logging.info(f"Pretrained-dense offsets resolved: fids={fids} -> "
+                     f"slices={offsets} "
+                     f"(total {sum(l for _, l in offsets)} dim)")
+    return offsets
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="PCVRHyFormer Training")
 
@@ -194,6 +228,21 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Pretrained user-embedding residual path (per LFM4Ads / SUM papers).
+    parser.add_argument('--use_pretrained_residual', action='store_true', default=True,
+                        help='Route user_dense_feats slices for fids in '
+                             '--pretrained_dense_fids through a dedicated '
+                             'non-linear adapter, residual-added to the pooled '
+                             'output before the classifier. fid 61 = SUM '
+                             '(Meta), fid 87 = LFM4Ads (Tencent).')
+    parser.add_argument('--no_pretrained_residual', dest='use_pretrained_residual',
+                        action='store_false',
+                        help='Disable the pretrained residual path')
+    parser.add_argument('--pretrained_dense_fids', type=str, default='61,87',
+                        help='Comma-separated user_dense fids to treat as '
+                             'pretrained user embeddings. Default 61,87 '
+                             '(SUM and LFM4Ads in this dataset).')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +350,9 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_pretrained_residual": args.use_pretrained_residual,
+        "pretrained_dense_offsets": _resolve_pretrained_offsets(
+            pcvr_dataset, args.pretrained_dense_fids),
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
