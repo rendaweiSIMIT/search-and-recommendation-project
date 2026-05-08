@@ -3,6 +3,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ---- Active config: RankMixer NS tokenizer (no ns_groups.json required) ----
+# Loss: focal_alpha=0.75 upweights the rare positive class (pos:neg ~ 1:7);
+# gamma=2 focuses the gradient on hard examples. Replaces the default BCE
+# which gives equal weight to abundant easy negatives.
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 5 \
@@ -11,6 +14,9 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_groups_json "" \
     --emb_skip_threshold 1000000 \
     --num_workers 8 \
+    --loss_type focal \
+    --focal_alpha 0.75 \
+    --focal_gamma 2.0 \
     "$@"
 
 # ---- Alternative config: GroupNSTokenizer driven by ns_groups.json ----
