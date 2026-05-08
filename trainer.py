@@ -389,6 +389,9 @@ class PCVRHyFormerRankingTrainer:
             seq_time_buckets[domain] = device_batch.get(
                 f'{domain}_time_bucket',
                 torch.zeros(B, L, dtype=torch.long, device=self.device))
+        # Missing-indicator tensors are optional; default to empty if absent
+        # (e.g., older datasets without missing-indicator support).
+        empty = torch.empty(0, device=self.device)
         return ModelInput(
             user_int_feats=device_batch['user_int_feats'],
             item_int_feats=device_batch['item_int_feats'],
@@ -397,6 +400,9 @@ class PCVRHyFormerRankingTrainer:
             seq_data=seq_data,
             seq_lens=seq_lens,
             seq_time_buckets=seq_time_buckets,
+            user_int_missing=device_batch.get('user_int_missing', empty),
+            item_int_missing=device_batch.get('item_int_missing', empty),
+            user_dense_missing=device_batch.get('user_dense_missing', empty),
         )
 
     def _train_step(self, batch: Dict[str, Any]) -> float:

@@ -218,6 +218,18 @@ class PCVRParquetDataset(IterableDataset):
         self._buf_user_int = np.zeros((B, self.user_int_schema.total_dim), dtype=np.int64)
         self._buf_item_int = np.zeros((B, self.item_int_schema.total_dim), dtype=np.int64)
         self._buf_user_dense = np.zeros((B, self.user_dense_schema.total_dim), dtype=np.float32)
+
+        # Per-feature missing-indicator buffers (1 bit per scalar/dense feature).
+        # Used by --use_missing_indicator on the model side.
+        self._num_user_int_scalar = sum(1 for fid, vs, dim in self._user_int_cols if dim == 1)
+        self._num_item_int_scalar = sum(1 for fid, vs, dim in self._item_int_cols if dim == 1)
+        self._num_user_dense_feats = len(self._user_dense_cols)
+        self._buf_user_int_missing = np.zeros(
+            (B, max(self._num_user_int_scalar, 1)), dtype=np.float32)
+        self._buf_item_int_missing = np.zeros(
+            (B, max(self._num_item_int_scalar, 1)), dtype=np.float32)
+        self._buf_user_dense_missing = np.zeros(
+            (B, max(self._num_user_dense_feats, 1)), dtype=np.float32)
         self._buf_seq = {}
         self._buf_seq_tb = {}
         self._buf_seq_lens = {}
@@ -523,10 +535,16 @@ class PCVRParquetDataset(IterableDataset):
         # range.
         user_int = self._buf_user_int[:B]
         user_int[:] = 0
+        user_int_missing = self._buf_user_int_missing[:B]
+        user_int_missing[:] = 0
+        mi = 0
         for ci, dim, offset, vs in self._user_int_plan:
             col = batch.column(ci)
             if dim == 1:
                 arr = col.fill_null(0).to_numpy(zero_copy_only=False).astype(np.int64)
+                # Capture missing mask BEFORE clipping <=0 to padding
+                user_int_missing[:, mi] = (arr <= 0).astype(np.float32)
+                mi += 1
                 arr[arr <= 0] = 0
                 if vs > 0:
                     self._record_oob('user_int', ci, arr, vs)
@@ -544,10 +562,15 @@ class PCVRParquetDataset(IterableDataset):
         # ---- item_int ----
         item_int = self._buf_item_int[:B]
         item_int[:] = 0
+        item_int_missing = self._buf_item_int_missing[:B]
+        item_int_missing[:] = 0
+        mi = 0
         for ci, dim, offset, vs in self._item_int_plan:
             col = batch.column(ci)
             if dim == 1:
                 arr = col.fill_null(0).to_numpy(zero_copy_only=False).astype(np.int64)
+                item_int_missing[:, mi] = (arr <= 0).astype(np.float32)
+                mi += 1
                 arr[arr <= 0] = 0
                 if vs > 0:
                     self._record_oob('item_int', ci, arr, vs)
@@ -565,8 +588,16 @@ class PCVRParquetDataset(IterableDataset):
         # ---- user_dense ----
         user_dense = self._buf_user_dense[:B]
         user_dense[:] = 0
-        for ci, dim, offset in self._user_dense_plan:
+        user_dense_missing = self._buf_user_dense_missing[:B]
+        user_dense_missing[:] = 0
+        for md, (ci, dim, offset) in enumerate(self._user_dense_plan):
             col = batch.column(ci)
+            # Missing for dense = null OR empty list (offsets[i+1]-offsets[i]==0).
+            # ListArray.offsets has length B+1; null entries also produce zero-length ranges.
+            offsets_arr = col.offsets.to_numpy()
+            user_dense_missing[:, md] = (
+                (offsets_arr[1:] - offsets_arr[:-1]) == 0
+            ).astype(np.float32)
             padded = self._pad_varlen_float_column(col, dim, B)
             user_dense[:, offset:offset + dim] = padded
 
@@ -575,6 +606,9 @@ class PCVRParquetDataset(IterableDataset):
             'user_dense_feats': torch.from_numpy(user_dense.copy()),
             'item_int_feats': torch.from_numpy(item_int.copy()),
             'item_dense_feats': torch.zeros(B, 0, dtype=torch.float32),
+            'user_int_missing': torch.from_numpy(user_int_missing.copy()),
+            'item_int_missing': torch.from_numpy(item_int_missing.copy()),
+            'user_dense_missing': torch.from_numpy(user_dense_missing.copy()),
             'label': torch.from_numpy(labels),
             'timestamp': torch.from_numpy(timestamps),
             'user_id': user_ids,

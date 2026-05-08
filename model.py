@@ -16,6 +16,11 @@ class ModelInput(NamedTuple):
     seq_data: dict        # {domain: tensor [B, S, L]}
     seq_lens: dict        # {domain: tensor [B]}
     seq_time_buckets: dict  # {domain: tensor [B, L]}
+    # Per-feature missing indicator (1=missing, 0=present). Empty tensor is allowed
+    # and skips the missing-indicator path on the model side.
+    user_int_missing: torch.Tensor = torch.empty(0)
+    item_int_missing: torch.Tensor = torch.empty(0)
+    user_dense_missing: torch.Tensor = torch.empty(0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1189,6 +1194,27 @@ class RankMixerNSTokenizer(nn.Module):
         return torch.cat(tokens, dim=1)  # (B, num_ns_tokens, d_model)
 
 
+class MissingIndicatorTokenizer(nn.Module):
+    """Project a binary missing-indicator vector to a single NS token.
+
+    Input: (B, num_features) of 0/1 floats.
+    Output: (B, 1, d_model).
+    """
+
+    def __init__(self, num_features: int, d_model: int, hidden_mult: int = 4) -> None:
+        super().__init__()
+        hidden = d_model * hidden_mult
+        self.fc1 = nn.Linear(num_features, hidden)
+        self.fc2 = nn.Linear(hidden, d_model)
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, missing: torch.Tensor) -> torch.Tensor:
+        x = F.silu(self.fc1(missing))
+        x = self.fc2(x)
+        x = self.norm(x)
+        return x.unsqueeze(1)  # (B, 1, D)
+
+
 class PCVRHyFormer(nn.Module):
     """PCVRHyFormer model for post-click conversion rate prediction.
 
@@ -1229,6 +1255,9 @@ class PCVRHyFormer(nn.Module):
         ns_tokenizer_type: str = 'rankmixer',
         user_ns_tokens: int = 0,
         item_ns_tokens: int = 0,
+        # Missing-indicator config
+        use_missing_indicator: bool = False,
+        num_user_dense_feats: int = 0,
     ) -> None:
         super().__init__()
 
@@ -1244,6 +1273,7 @@ class PCVRHyFormer(nn.Module):
         self.emb_skip_threshold = emb_skip_threshold
         self.seq_id_threshold = seq_id_threshold
         self.ns_tokenizer_type = ns_tokenizer_type
+        self.use_missing_indicator = use_missing_indicator
 
         # ================== NS Tokens Construction ==================
 
@@ -1311,9 +1341,29 @@ class PCVRHyFormer(nn.Module):
                 nn.LayerNorm(d_model),
             )
 
+        # Missing-indicator tokenizers (one per side, +2 NS tokens total).
+        if use_missing_indicator:
+            num_user_int_scalar = sum(
+                1 for vs, off, length in user_int_feature_specs if length == 1)
+            num_item_int_scalar = sum(
+                1 for vs, off, length in item_int_feature_specs if length == 1)
+            # User side absorbs both user_int scalar bits and user_dense bits.
+            user_miss_in = num_user_int_scalar + num_user_dense_feats
+            item_miss_in = num_item_int_scalar
+            self.user_missing_tokenizer = MissingIndicatorTokenizer(
+                num_features=max(user_miss_in, 1), d_model=d_model, hidden_mult=hidden_mult)
+            self.item_missing_tokenizer = MissingIndicatorTokenizer(
+                num_features=max(item_miss_in, 1), d_model=d_model, hidden_mult=hidden_mult)
+            self._user_miss_in = user_miss_in
+            self._item_miss_in = item_miss_in
+            num_missing_ns = 2
+        else:
+            num_missing_ns = 0
+
         # Total NS token count
         self.num_ns = (num_user_ns + (1 if self.has_user_dense else 0)
-                       + num_item_ns + (1 if self.has_item_dense else 0))
+                       + num_item_ns + (1 if self.has_item_dense else 0)
+                       + num_missing_ns)
 
         # ================== Check d_model % T == 0 constraint (full mode only) ==================
         T = num_queries * self.num_sequences + self.num_ns
@@ -1641,10 +1691,16 @@ class PCVRHyFormer(nn.Module):
         if self.has_user_dense:
             user_dense_tok = F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1)  # (B, 1, D)
             ns_parts.append(user_dense_tok)
+        if self.use_missing_indicator:
+            user_miss_in = torch.cat(
+                [inputs.user_int_missing, inputs.user_dense_missing], dim=1)
+            ns_parts.append(self.user_missing_tokenizer(user_miss_in))   # (B, 1, D)
         ns_parts.append(item_ns)
         if self.has_item_dense:
             item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)  # (B, 1, D)
             ns_parts.append(item_dense_tok)
+        if self.use_missing_indicator:
+            ns_parts.append(self.item_missing_tokenizer(inputs.item_int_missing))  # (B, 1, D)
 
         ns_tokens = torch.cat(ns_parts, dim=1)  # (B, num_ns, D)
 
@@ -1684,10 +1740,16 @@ class PCVRHyFormer(nn.Module):
         if self.has_user_dense:
             user_dense_tok = F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1)
             ns_parts.append(user_dense_tok)
+        if self.use_missing_indicator:
+            user_miss_in = torch.cat(
+                [inputs.user_int_missing, inputs.user_dense_missing], dim=1)
+            ns_parts.append(self.user_missing_tokenizer(user_miss_in))
         ns_parts.append(item_ns)
         if self.has_item_dense:
             item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)
             ns_parts.append(item_dense_tok)
+        if self.use_missing_indicator:
+            ns_parts.append(self.item_missing_tokenizer(inputs.item_int_missing))
 
         ns_tokens = torch.cat(ns_parts, dim=1)
 

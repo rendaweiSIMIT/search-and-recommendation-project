@@ -194,6 +194,16 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Missing-indicator features.
+    parser.add_argument('--use_missing_indicator', action='store_true', default=True,
+                        help='Add per-feature missing-indicator NS tokens (one for user, '
+                             'one for item). Default on. Adds 2 to num_ns; ensure '
+                             'd_model %% T == 0 still holds (e.g., reduce '
+                             '--user_ns_tokens / --item_ns_tokens by 1 each to compensate).')
+    parser.add_argument('--no_missing_indicator', dest='use_missing_indicator',
+                        action='store_false',
+                        help='Disable missing-indicator NS tokens')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +311,8 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_missing_indicator": args.use_missing_indicator,
+        "num_user_dense_feats": len(pcvr_dataset.user_dense_schema.entries),
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)

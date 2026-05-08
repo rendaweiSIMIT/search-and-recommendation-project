@@ -3,10 +3,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ---- Active config: RankMixer NS tokenizer (no ns_groups.json required) ----
+# Note: user_ns_tokens 5->4 and item_ns_tokens 2->1 (vs original baseline) to
+# keep total num_ns=8 (and T=16) after enabling --use_missing_indicator, which
+# adds 2 NS tokens (one for user, one for item). Total NS budget unchanged.
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
-    --user_ns_tokens 5 \
-    --item_ns_tokens 2 \
+    --user_ns_tokens 4 \
+    --item_ns_tokens 1 \
     --num_queries 2 \
     --ns_groups_json "" \
     --emb_skip_threshold 1000000 \
