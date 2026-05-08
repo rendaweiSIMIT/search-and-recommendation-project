@@ -1229,6 +1229,18 @@ class PCVRHyFormer(nn.Module):
         ns_tokenizer_type: str = 'rankmixer',
         user_ns_tokens: int = 0,
         item_ns_tokens: int = 0,
+        # Pretrained user-embedding GATING path (LFM4Ads paper, Eq 3-4).
+        # When `pretrained_dense_offsets` is non-empty, slices of
+        # `user_dense_feats` indexed by these (offset, length) tuples are
+        # routed through a non-linear adapter and combined with the pooled
+        # output via element-wise GATING (`output * 2 * sigmoid(adapter(emb))`)
+        # instead of plain addition. This implements the LFM4Ads paper's
+        # "Non-Linear Interaction" recipe (Section 3.4.1): pretrained
+        # embedding modulates downstream features dimension-by-dimension,
+        # allowing both amplification (gate>1) and suppression (gate<1).
+        # 2*sigmoid centers gate at 1 (PEPNet-style).
+        use_pretrained_gating: bool = False,
+        pretrained_dense_offsets: Tuple[Tuple[int, int], ...] = (),
     ) -> None:
         super().__init__()
 
@@ -1244,6 +1256,9 @@ class PCVRHyFormer(nn.Module):
         self.emb_skip_threshold = emb_skip_threshold
         self.seq_id_threshold = seq_id_threshold
         self.ns_tokenizer_type = ns_tokenizer_type
+        # Pretrained dense gating path
+        self.use_pretrained_gating = bool(use_pretrained_gating and pretrained_dense_offsets)
+        self.pretrained_dense_offsets = tuple((int(o), int(l)) for o, l in pretrained_dense_offsets)
 
         # ================== NS Tokens Construction ==================
 
@@ -1324,6 +1339,30 @@ class PCVRHyFormer(nn.Module):
                 f"{num_queries}*{self.num_sequences}+{self.num_ns}={T}. "
                 f"Valid T values for d_model={d_model}: {valid_T_values}"
             )
+
+        # ================== Pretrained Dense Gating (LFM4Ads Eq 3-4) ==================
+        # The pretrained user embeddings (SUM, LMF4Ads) shape a per-dimension
+        # gate that modulates the pooled output before the classifier:
+        #     output' = output * 2 * sigmoid(adapter(pretrained))
+        # adapter is a 2-layer MLP. The factor of 2 centers the gate at 1
+        # (PEPNet-style), so sigmoid output of 0.5 acts as identity, giving
+        # the pretrained embedding both amplification (>1) and suppression
+        # (<1) capability. Differs from the plain additive variant in
+        # exp/pretrained-residual: gating is the recipe LFM4Ads validated
+        # in production, while addition is the projection-matrix baseline
+        # they tried and reported failed.
+        if self.use_pretrained_gating:
+            pretrained_dim = sum(length for _, length in self.pretrained_dense_offsets)
+            adapter_hidden = d_model * 2
+            self.user_pretrained_adapter = nn.Sequential(
+                nn.Linear(pretrained_dim, adapter_hidden),
+                nn.SiLU(),
+                nn.Linear(adapter_hidden, d_model),
+                nn.LayerNorm(d_model),
+            )
+            logging.info(
+                f"Pretrained-gating: {pretrained_dim}-d input "
+                f"(offsets={self.pretrained_dense_offsets}) -> {d_model}-d gate via 2-layer adapter")
 
         # ================== Seq Tokens Embedding ==================
         # seq_id_threshold decides which features inside the seq tokenizer are
@@ -1581,6 +1620,28 @@ class PCVRHyFormer(nn.Module):
         idx = torch.arange(max_len, device=device).unsqueeze(0)  # (1, max_len)
         return idx >= seq_len.unsqueeze(1)  # (B, max_len)
 
+    def _gate_with_pretrained(
+        self, output: torch.Tensor, user_dense_feats: torch.Tensor
+    ) -> torch.Tensor:
+        """LFM4Ads Eq 3-4: element-wise multiplicative gating.
+
+        ``output' = output * 2 * sigmoid(adapter(pretrained))``
+
+        Args:
+            output: (B, D) pooled representation right before the classifier.
+            user_dense_feats: (B, total_user_dense_dim) full dense vector.
+
+        Returns:
+            (B, D) tensor; identical to ``output`` when gating is off.
+        """
+        if not self.use_pretrained_gating:
+            return output
+        slices = [user_dense_feats[:, off:off + length]
+                  for off, length in self.pretrained_dense_offsets]
+        pretrained = torch.cat(slices, dim=-1)  # (B, sum_pretrained_dim)
+        gate = 2.0 * torch.sigmoid(self.user_pretrained_adapter(pretrained))
+        return output * gate
+
     def _run_multi_seq_blocks(
         self,
         q_tokens_list: list,
@@ -1670,6 +1731,9 @@ class PCVRHyFormer(nn.Module):
             apply_dropout=self.training
         )
 
+        # 4b. LFM4Ads-style gating with pretrained user embeddings
+        output = self._gate_with_pretrained(output, inputs.user_dense_feats)
+
         # 5. Classifier
         logits = self.clsfier(output)  # (B, action_num)
         return logits
@@ -1709,6 +1773,9 @@ class PCVRHyFormer(nn.Module):
             q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
             apply_dropout=False
         )
+
+        # LFM4Ads-style gating with pretrained user embeddings
+        output = self._gate_with_pretrained(output, inputs.user_dense_feats)
 
         logits = self.clsfier(output)
         return logits, output
