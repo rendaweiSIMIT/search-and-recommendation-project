@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Local outputs (avoid accidentally committing checkpoints/logs)
+runs/
+ckpt*/
+logs*/
+tb*/
