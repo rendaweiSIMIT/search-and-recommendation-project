@@ -2,12 +2,18 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- Active config: RankMixer NS tokenizer (no ns_groups.json required) ----
+# ---- Active config: exp/seq-hash ----
+# Hash-trick rescue for the 4 sequence features that the platform's
+# emb_skip_threshold=1M dropped (b_seq_69 max=64M, c_seq_29 max=5.76M,
+# c_seq_34 max=1.03M, c_seq_47 max=86.34M -- almost certainly the user
+# item-id history). Hash into 100K buckets so the model still sees
+# *something* for these columns at the cost of bucket-collision noise.
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 5 \
     --item_ns_tokens 2 \
     --num_queries 2 \
+    --seq_hash_size 100000 \
     --ns_groups_json "" \
     --emb_skip_threshold 1000000 \
     --num_workers 8 \

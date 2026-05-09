@@ -194,6 +194,12 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Hash-trick rescue for high-cardinality sequence features.
+    parser.add_argument('--seq_hash_size', type=int, default=0,
+                        help='When >0, sequence features whose vocab exceeds '
+                             '--emb_skip_threshold are hashed into '
+                             'seq_hash_size buckets instead of being skipped')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +307,7 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "seq_hash_size": args.seq_hash_size,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
