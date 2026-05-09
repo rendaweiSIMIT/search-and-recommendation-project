@@ -2,12 +2,17 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- Active config: RankMixer NS tokenizer (no ns_groups.json required) ----
+# ---- Active config: exp/null-pattern ----
+# Adds 1 NS token from joint missingness of user_int_99..103. These five
+# columns are 82-92% null individually; the joint pattern (5 bits ->
+# 0..31) likely segments users (logged-in vs not, new vs old, ...).
+# user_ns_tokens 5 -> 4 to preserve T = 16 with one extra token.
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
-    --user_ns_tokens 5 \
+    --user_ns_tokens 4 \
     --item_ns_tokens 2 \
     --num_queries 2 \
+    --use_null_pattern \
     --ns_groups_json "" \
     --emb_skip_threshold 1000000 \
     --num_workers 8 \

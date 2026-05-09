@@ -194,6 +194,15 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Null-pattern feature: 1 NS token from joint missingness of
+    # user_int_99..103 (5 bits -> 0..31 categorical). run.sh reduces
+    # user_ns_tokens 5 -> 4 to preserve T = 16.
+    parser.add_argument('--use_null_pattern', action='store_true', default=False,
+                        help='Enable null_pattern_99_103 NS token (1 extra token)')
+    parser.add_argument('--no_null_pattern', dest='use_null_pattern',
+                        action='store_false',
+                        help='Disable null_pattern_99_103 NS token')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +310,7 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_null_pattern": args.use_null_pattern,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
