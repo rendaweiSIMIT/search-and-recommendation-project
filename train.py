@@ -194,6 +194,13 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Hour-of-day feature: 1 extra NS token from ``hour = (ts // 3600) % 24``.
+    # run.sh reduces user_ns_tokens 5 -> 4 to preserve T = 16.
+    parser.add_argument('--use_hour', action='store_true', default=False,
+                        help='Enable hour-of-day NS token (1 extra token)')
+    parser.add_argument('--no_hour', dest='use_hour', action='store_false',
+                        help='Disable hour-of-day NS token')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +308,7 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_hour": args.use_hour,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)

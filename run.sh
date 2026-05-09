@@ -2,12 +2,16 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- Active config: RankMixer NS tokenizer (no ns_groups.json required) ----
+# ---- Active config: exp/hour-of-day ----
+# Adds 1 NS token from hour-of-day. 3.86 days of data => DoW too sparse,
+# but each hour appears 3-4 times => learnable diurnal CTR/CVR cycle.
+# user_ns_tokens 5 -> 4 to preserve T = 16 with one extra token.
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
-    --user_ns_tokens 5 \
+    --user_ns_tokens 4 \
     --item_ns_tokens 2 \
     --num_queries 2 \
+    --use_hour \
     --ns_groups_json "" \
     --emb_skip_threshold 1000000 \
     --num_workers 8 \
