@@ -14,7 +14,7 @@ import json
 import argparse
 import logging
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -36,6 +36,62 @@ def build_feature_specs(
         vs = max(per_position_vocab_sizes[offset:offset + length])
         specs.append((vs, offset, length))
     return specs
+
+
+def _resolve_paired_pool_map(
+    pcvr_dataset, paired_pool_fids_str: str,
+) -> Dict[int, Tuple[int, int]]:
+    """Translate a comma-separated list of fids (e.g. "62,63,64,65,66,89,90,91")
+    into a mapping ``{user_int_position_index: (dense_offset, dense_length)}``
+    so that ``RankMixerNSTokenizer`` can replace mean-pool with a softmax-
+    weighted pool over the dense slice for those fids.
+
+    A fid is admitted only if (a) it is present in BOTH schemas and (b) the
+    int and dense slices have identical length (a hard requirement for the
+    element-wise alignment described by the dataset README). Anything else
+    is logged as a warning and skipped, so schema mismatches degrade
+    gracefully into a no-op rather than crashing the run.
+    """
+    if not paired_pool_fids_str:
+        return {}
+    try:
+        fids = [int(x.strip()) for x in paired_pool_fids_str.split(',') if x.strip()]
+    except ValueError:
+        logging.warning(f"Could not parse --paired_pool_fids="
+                        f"{paired_pool_fids_str!r}, disabling")
+        return {}
+
+    int_schema = pcvr_dataset.user_int_schema
+    dense_schema = pcvr_dataset.user_dense_schema
+    int_fid_to_idx = {fid: i for i, (fid, _, _) in enumerate(int_schema.entries)}
+
+    paired_map: Dict[int, Tuple[int, int]] = {}
+    for fid in fids:
+        if fid not in int_fid_to_idx:
+            logging.warning(f"--paired_pool_fids={fid} not in user_int_schema; skipping")
+            continue
+        if fid not in dense_schema._fid_to_entry:
+            logging.warning(f"--paired_pool_fids={fid} not in user_dense_schema; skipping")
+            continue
+        int_idx = int_fid_to_idx[fid]
+        _, _, int_len = int_schema.entries[int_idx]
+        d_off, d_len = dense_schema.get_offset_length(fid)
+        if int_len != d_len:
+            logging.warning(
+                f"--paired_pool_fids={fid}: int_len={int_len} != dense_len={d_len}, "
+                f"alignment broken; skipping")
+            continue
+        paired_map[int_idx] = (d_off, d_len)
+    if paired_map:
+        accepted_fids = [f for f in fids
+                         if f in int_fid_to_idx and f in dense_schema._fid_to_entry
+                         and int_schema.entries[int_fid_to_idx[f]][2]
+                         == dense_schema.get_offset_length(f)[1]]
+        logging.info(
+            f"Paired pool resolved: requested fids={fids} accepted={accepted_fids} "
+            f"(int_idx -> dense slice): {sorted(paired_map.items())}"
+        )
+    return paired_map
 
 
 def parse_args() -> argparse.Namespace:
@@ -194,6 +250,20 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Paired (int, dense) weighted pooling. The dataset README documents 8
+    # element-wise aligned pairs (user_int / user_dense for fids 62-66 and
+    # 89-91); when enabled, the rankmixer tokenizer pools each int feature's
+    # embeddings with softmax(signed_log1p(dense)) weights instead of mean
+    # pool, so per-category statistics like dwell time / score actually steer
+    # the user representation. Pass an empty string to disable.
+    parser.add_argument('--paired_pool_fids', type=str,
+                        default='62,63,64,65,66,89,90,91',
+                        help='Comma-separated user_int / user_dense fids whose '
+                             'aligned dense slice supplies softmax weights for '
+                             'pooling the int embedding. Default: all 8 paired '
+                             'columns documented in the dataset README. Pass '
+                             'an empty string to fall back to baseline mean pool.')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +371,8 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "user_paired_pool_map": _resolve_paired_pool_map(
+            pcvr_dataset, args.paired_pool_fids),
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
