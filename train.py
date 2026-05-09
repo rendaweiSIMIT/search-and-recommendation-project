@@ -194,6 +194,14 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Item-match feature: 1 extra NS token from "did this user see item_id
+    # in c_seq_47?". To preserve T=16, run.sh sets user_ns_tokens 5 -> 4.
+    parser.add_argument('--use_item_match', action='store_true', default=False,
+                        help='Enable item_in_c47 NS token (1 extra token)')
+    parser.add_argument('--no_item_match', dest='use_item_match',
+                        action='store_false',
+                        help='Disable item_in_c47 NS token')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +309,7 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_item_match": args.use_item_match,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
