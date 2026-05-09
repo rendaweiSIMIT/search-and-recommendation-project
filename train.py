@@ -194,6 +194,27 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Hash-trick rescue for high-cardinality sequence features. With
+    # emb_skip_threshold=1M, domain_b/c lose 1+3 features (notably
+    # c_seq_47 max=86M which appears to mirror item_id). Hashing into a
+    # 100K-bucket table preserves some signal at the cost of collision
+    # noise. 0 disables (baseline).
+    parser.add_argument('--seq_hash_size', type=int, default=100000,
+                        help='When >0, sequence features whose vocab exceeds '
+                             '--emb_skip_threshold are hashed into '
+                             'seq_hash_size buckets instead of being skipped')
+
+    # Synthesized context features (hour-of-day, item_in_c47, null pattern of
+    # user_int_99..103). When True, the model adds one ContextTokenizer
+    # producing one extra NS token. To keep T = num_queries*num_sequences +
+    # num_ns divisible by d_model=64, run.sh reduces user_ns_tokens 5->4.
+    parser.add_argument('--use_context_features', action='store_true', default=True,
+                        help='Enable ContextTokenizer (hour, item_in_c47, '
+                             'null_pattern_99_103 -> 1 extra NS token)')
+    parser.add_argument('--no_context_features', dest='use_context_features',
+                        action='store_false',
+                        help='Disable the context tokenizer')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +322,8 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "seq_hash_size": args.seq_hash_size,
+        "use_context_features": args.use_context_features,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
