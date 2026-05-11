@@ -2,7 +2,22 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- Active config: RankMixer NS tokenizer (no ns_groups.json required) ----
+# ---- Active config: exp/pretrained-mixed-extended ----
+# Combines three pretrained-embedding adapters + paired-pool restricted
+# to raw-counter columns:
+#
+#   Output side: output' = output * gate_87 + residual_61 + residual_89_91
+#     * fid 61 (Meta SUM, 256-d)   -> additive adapter (residual)
+#     * fid 87 (Tencent LFM4Ads)   -> gating adapter (multiplicative)
+#     * fid 89-91 (3 x 10-d affinity scores) -> additive adapter (NEW)
+#
+#   Input side: NS tokenizer paired pool on fid 62,63,64,65,66 only.
+#     (fid 89-91 dropped from paired-pool since their [-1,1] range made
+#      signed_log1p + softmax a no-op; they now flow through the
+#      output-side adapter above instead.)
+#
+# All four CLI knobs default to the right values in train.py, so the
+# only thing run.sh needs to set is the existing rankmixer config.
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 5 \

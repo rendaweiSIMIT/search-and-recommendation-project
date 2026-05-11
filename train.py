@@ -14,7 +14,7 @@ import json
 import argparse
 import logging
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -36,6 +36,85 @@ def build_feature_specs(
         vs = max(per_position_vocab_sizes[offset:offset + length])
         specs.append((vs, offset, length))
     return specs
+
+
+def _resolve_dense_fid_offsets(
+    pcvr_dataset, fids_str: str, label: str,
+) -> List[Tuple[int, int]]:
+    """Translate a comma-separated list of user_dense fids (e.g. "61")
+    into the corresponding ``(offset, length)`` slices inside the flat
+    user_dense feature vector. Unknown fids are silently skipped so
+    schema mismatches at submission time degrade gracefully (the path
+    becomes a no-op for that fid).
+    """
+    if not fids_str:
+        return []
+    try:
+        fids = [int(x.strip()) for x in fids_str.split(',') if x.strip()]
+    except ValueError:
+        logging.warning(f"Could not parse {label}={fids_str!r}, disabling path")
+        return []
+    offsets: List[Tuple[int, int]] = []
+    schema = pcvr_dataset.user_dense_schema
+    for fid in fids:
+        if fid in schema._fid_to_entry:
+            offset, length = schema.get_offset_length(fid)
+            offsets.append((offset, length))
+        else:
+            logging.warning(f"{label}={fid} not found in user_dense_schema; skipping")
+    if offsets:
+        logging.info(f"{label} resolved: fids={fids} -> slices={offsets} "
+                     f"(total {sum(l for _, l in offsets)} dim)")
+    return offsets
+
+
+def _resolve_paired_pool_map(
+    pcvr_dataset, paired_pool_fids_str: str,
+) -> Dict[int, Tuple[int, int]]:
+    """Translate a comma-separated list of fids (e.g. "62,63,64,65,66")
+    into ``{user_int_position_index: (dense_offset, dense_length)}`` so
+    RankMixerNSTokenizer can replace mean-pool with softmax-weighted pool
+    for those fids. A fid is admitted only if (a) both schemas contain
+    it and (b) int/dense slice lengths agree.
+    """
+    if not paired_pool_fids_str:
+        return {}
+    try:
+        fids = [int(x.strip()) for x in paired_pool_fids_str.split(',') if x.strip()]
+    except ValueError:
+        logging.warning(f"Could not parse --paired_pool_fids="
+                        f"{paired_pool_fids_str!r}, disabling")
+        return {}
+
+    int_schema = pcvr_dataset.user_int_schema
+    dense_schema = pcvr_dataset.user_dense_schema
+    int_fid_to_idx = {fid: i for i, (fid, _, _) in enumerate(int_schema.entries)}
+
+    paired_map: Dict[int, Tuple[int, int]] = {}
+    accepted: List[int] = []
+    for fid in fids:
+        if fid not in int_fid_to_idx:
+            logging.warning(f"--paired_pool_fids={fid} not in user_int_schema; skipping")
+            continue
+        if fid not in dense_schema._fid_to_entry:
+            logging.warning(f"--paired_pool_fids={fid} not in user_dense_schema; skipping")
+            continue
+        int_idx = int_fid_to_idx[fid]
+        _, _, int_len = int_schema.entries[int_idx]
+        d_off, d_len = dense_schema.get_offset_length(fid)
+        if int_len != d_len:
+            logging.warning(
+                f"--paired_pool_fids={fid}: int_len={int_len} != dense_len={d_len}, "
+                f"alignment broken; skipping")
+            continue
+        paired_map[int_idx] = (d_off, d_len)
+        accepted.append(fid)
+    if paired_map:
+        logging.info(
+            f"Paired pool resolved: requested fids={fids} accepted={accepted} "
+            f"(int_idx -> dense slice): {sorted(paired_map.items())}"
+        )
+    return paired_map
 
 
 def parse_args() -> argparse.Namespace:
@@ -194,6 +273,30 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Pretrained-embedding adapter paths (mixed-extended branch).
+    # Each user_dense fid honors its source paper's recipe via a dedicated
+    # 2-layer adapter, summed/multiplied with the pooled output before the
+    # classifier:
+    #   output' = output * gate_87 + residual_61 + residual_89_91
+    parser.add_argument('--additive_dense_fids', type=str, default='61',
+                        help='user_dense fids routed through the SUM-style '
+                             'additive adapter (default 61 = Meta SUM)')
+    parser.add_argument('--gating_dense_fids', type=str, default='87',
+                        help='user_dense fids routed through the LFM4Ads-style '
+                             'gating adapter (default 87 = Tencent LFM4Ads)')
+    parser.add_argument('--extra_additive_dense_fids', type=str, default='89,90,91',
+                        help='NEW: user_dense fids routed through a SECOND, '
+                             'separate additive adapter. Default 89,90,91 = '
+                             '3 sets of 10-dim per-category affinity scores '
+                             'that look like a smaller third pretrained source.')
+
+    # Paired-pool restricted to raw-counter columns. 89-91 are deliberately
+    # removed (their [-1,1] range made signed_log1p + softmax a no-op).
+    parser.add_argument('--paired_pool_fids', type=str, default='62,63,64,65,66',
+                        help='user_int / user_dense fids whose aligned dense '
+                             'slice supplies softmax weights for pooling the '
+                             'int embedding (default 62-66 = raw counters)')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +404,15 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "additive_dense_offsets": _resolve_dense_fid_offsets(
+            pcvr_dataset, args.additive_dense_fids, '--additive_dense_fids'),
+        "gating_dense_offsets": _resolve_dense_fid_offsets(
+            pcvr_dataset, args.gating_dense_fids, '--gating_dense_fids'),
+        "extra_additive_dense_offsets": _resolve_dense_fid_offsets(
+            pcvr_dataset, args.extra_additive_dense_fids,
+            '--extra_additive_dense_fids'),
+        "user_paired_pool_map": _resolve_paired_pool_map(
+            pcvr_dataset, args.paired_pool_fids),
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
