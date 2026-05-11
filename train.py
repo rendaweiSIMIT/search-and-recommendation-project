@@ -194,6 +194,22 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # OneTrans (ByteDance WWW 2026) -style suffix head: a single causal
+    # pyramid attention block with mixed parameterization (shared QKV/FFN
+    # for sequence tokens, per-token QKV/FFN for NS tokens) appended after
+    # the HyFormer block stack. The enriched NS tokens are pooled into a
+    # residual added to the pooled output before the classifier.
+    parser.add_argument('--use_onetrans_suffix', action='store_true', default=False,
+                        help='Enable OneTrans-style mixed-parameterization '
+                             'causal pyramid attention block as a post-HyFormer '
+                             'NS-enrichment head')
+    parser.add_argument('--no_onetrans_suffix', dest='use_onetrans_suffix',
+                        action='store_false',
+                        help='Disable the OneTrans suffix block')
+    parser.add_argument('--onetrans_hidden_mult', type=int, default=4,
+                        help='Per-NS-token FFN expansion multiplier in the '
+                             'OneTrans suffix block (default 4)')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +317,8 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_onetrans_suffix": args.use_onetrans_suffix,
+        "onetrans_hidden_mult": args.onetrans_hidden_mult,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
