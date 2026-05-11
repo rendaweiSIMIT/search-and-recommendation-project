@@ -194,6 +194,21 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # SENet (FibiNET-style) per-sample feature gating inside the RankMixer
+    # NS tokenizer. When enabled the tokenizer learns a (B, num_fids) gate
+    # vector that reweights each fid's embedding before the concat-split
+    # step. Active only with ns_tokenizer_type='rankmixer'.
+    parser.add_argument('--use_senet_gating', action='store_true', default=False,
+                        help='Enable FibiNET-style SENet per-sample feature '
+                             'gating in the RankMixer tokenizer (both user '
+                             'and item sides).')
+    parser.add_argument('--no_senet_gating', dest='use_senet_gating',
+                        action='store_false',
+                        help='Disable SENet gating')
+    parser.add_argument('--senet_reduction', type=int, default=4,
+                        help='Hidden-dim reduction ratio for the SENet MLP '
+                             '(higher = more aggressive squeeze, fewer params)')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +316,8 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_senet_gating": args.use_senet_gating,
+        "senet_reduction": args.senet_reduction,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
