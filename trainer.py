@@ -414,6 +414,27 @@ class PCVRHyFormerRankingTrainer:
 
         if self.loss_type == 'focal':
             loss = sigmoid_focal_loss(logits, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+        elif self.loss_type == 'bpr':
+            # All-pairs BPR (Bayesian Personalized Ranking) within this batch.
+            # For every (positive, negative) pair (i, j) push score_i > score_j
+            # via -log(sigmoid(score_i - score_j)). This directly optimizes a
+            # smooth surrogate of P(score(pos) > score(neg)) -- i.e. AUC.
+            #
+            # Edge cases:
+            #   * batch with 0 positives OR 0 negatives -> no pairs, fall back
+            #     to BCE so the step still produces a gradient (mostly a no-op
+            #     since label is all the same, but keeps the optimizer warm).
+            #   * mixed batch -> (P, N) pair matrix, fully vectorized.
+            pos_mask = (label > 0.5)
+            neg_mask = ~pos_mask
+            if pos_mask.any() and neg_mask.any():
+                pos_logits = logits[pos_mask]                 # (P,)
+                neg_logits = logits[neg_mask]                 # (N,)
+                diff = pos_logits.unsqueeze(1) - neg_logits.unsqueeze(0)  # (P, N)
+                loss = -F.logsigmoid(diff).mean()
+            else:
+                # Degenerate batch: fall back to BCE so we still have a signal.
+                loss = F.binary_cross_entropy_with_logits(logits, label)
         else:
             loss = F.binary_cross_entropy_with_logits(logits, label)
         loss.backward()

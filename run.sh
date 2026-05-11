@@ -2,12 +2,31 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- Active config: RankMixer NS tokenizer (no ns_groups.json required) ----
+# Defensive against vGPU memory fragmentation (Taiji shares physical GPU
+# across tenants; mixed-extended hit OOM here on first run before this
+# fix). Pure CUDA allocator change, no training-dynamics impact.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# ---- Active config: exp/bpr-loss ----
+# Replace BCE with all-pairs BPR ranking loss inside each batch.
+# For each (positive, negative) pair in the batch (B=256 -> ~24 pos x ~232
+# neg -> ~5500 pairs) the loss is -log(sigmoid(score_pos - score_neg)),
+# a smooth surrogate for P(score_pos > score_neg) = AUC. Directly aligned
+# with the evaluation metric, no model / dataset change required.
+#
+# Why not focal: focal reweights "hard examples" assuming hard = informative,
+# but in PCVR data hard often = label noise. focal hurt -0.x in previous test.
+# BPR avoids that trap entirely by working on RELATIVE scores instead of
+# absolute calibration.
+#
+# Edge case: if a batch happens to have 0 positives or 0 negatives the loss
+# falls back to BCE so the step still produces a gradient.
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 5 \
     --item_ns_tokens 2 \
     --num_queries 2 \
+    --loss_type bpr \
     --ns_groups_json "" \
     --emb_skip_threshold 1000000 \
     --num_workers 8 \

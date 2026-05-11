@@ -135,8 +135,12 @@ def parse_args() -> argparse.Namespace:
                         help='RoPE base frequency (default 10000)')
 
     # Loss function.
-    parser.add_argument('--loss_type', type=str, default='bce', choices=['bce', 'focal'],
-                        help='Loss type: bce = BCEWithLogits, focal = Focal Loss')
+    parser.add_argument('--loss_type', type=str, default='bce',
+                        choices=['bce', 'focal', 'bpr'],
+                        help='Loss type: bce = BCEWithLogits, focal = Focal '
+                             'Loss, bpr = all-pairs Bayesian Personalized '
+                             'Ranking within batch (directly optimizes the '
+                             'AUC surrogate -log sigmoid(score_pos - score_neg))')
     parser.add_argument('--focal_alpha', type=float, default=0.1,
                         help='Focal Loss positive-class weight alpha '
                              '(effective only when --loss_type=focal)')
