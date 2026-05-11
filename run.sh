@@ -2,6 +2,15 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
+# Switch PyTorch's CUDA caching allocator from fixed-size blocks to
+# expandable virtual segments. This is the recommended fix for OOMs of
+# the form "Tried to allocate XXX MiB, GPU 0 has YYY GiB free" that show
+# up under vGPU contention (the Taiji platform shares a physical GPU
+# across tenants; even when our quota looks free, the actual physical
+# memory may be fragmented or partially held by other slices). Pure
+# allocator change, no model behavior impact.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # ---- Active config: exp/pretrained-mixed-extended ----
 # Combines three pretrained-embedding adapters + paired-pool restricted
 # to raw-counter columns:
