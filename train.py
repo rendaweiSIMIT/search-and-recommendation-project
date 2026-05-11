@@ -194,6 +194,16 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Cross-sequence pooling in Query Generation (HyFormer paper §4.2.2):
+    # when enabled, each sequence's query FFNs see the pool of ALL sequences
+    # rather than just its own pool. Paper ablation reports -0.05% AUC when
+    # removed from the full HyFormer.
+    parser.add_argument('--use_cross_seq_pool', action='store_true', default=False,
+                        help='Use cross-sequence pool tokens in Query Generation '
+                             '(HyFormer paper §4.2.2, inter-sequence interaction). '
+                             'Adds (S-1)*d_model to the FFN input dim per query '
+                             'in MultiSeqQueryGenerator.')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +311,7 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_cross_seq_pool": args.use_cross_seq_pool,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
