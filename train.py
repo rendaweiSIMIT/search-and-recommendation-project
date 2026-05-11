@@ -194,6 +194,23 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # InterFormer-style Cross Arch: seq -> non-seq feedback. Adds a
+    # CrossArchSummarizer that pools each domain's evolved seq tokens via
+    # (CLS-attention + recent-K mean), projects through a gated MLP, and
+    # adds the result as a residual to the pooled output before the
+    # classifier. Captures the missing s2n direction in the baseline
+    # architecture (Meta CIKM 2025 paper).
+    parser.add_argument('--use_cross_arch', action='store_true', default=False,
+                        help='Enable InterFormer-style seq -> NS Cross Arch '
+                             'feedback head (CLS-attn + recent-K mean -> '
+                             'residual to pooled output)')
+    parser.add_argument('--no_cross_arch', dest='use_cross_arch',
+                        action='store_false',
+                        help='Disable Cross Arch feedback')
+    parser.add_argument('--cross_arch_recent_k', type=int, default=8,
+                        help='Number of most-recent tokens averaged in the '
+                             'Cross Arch recent-K pooling (default 8)')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +318,8 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_cross_arch": args.use_cross_arch,
+        "cross_arch_recent_k": args.cross_arch_recent_k,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)

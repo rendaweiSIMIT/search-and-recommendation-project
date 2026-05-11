@@ -2,12 +2,43 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- Active config: RankMixer NS tokenizer (no ns_groups.json required) ----
+# Defensive against vGPU memory fragmentation.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# ---- Active config: exp/inter-cross-arch ----
+# InterFormer-style sequence -> non-sequence (s2n) feedback.
+#
+# Motivation (from Meta CIKM 2025 paper):
+#   - Baseline architecture has unidirectional info flow: NS guides Q
+#     which attends seq (n2s direction). The reverse path (seq summary
+#     informs NS) is completely missing.
+#   - InterFormer ablation (sole < sep < n2s ≈ s2n < int) shows that
+#     bidirectional info flow consistently beats unidirectional.
+#
+# Implementation:
+#   - After all HyFormer blocks run, take the EVOLVED seq tokens per
+#     domain and produce two summary vectors per domain:
+#       * CLS-pool: a learnable query attends over evolved seq tokens
+#       * Recent-K mean: mean of the K most-recent valid positions
+#         (sequences are descending-sorted, K=8 by default)
+#   - Concat the 2*num_domains summaries -> 2-layer MLP -> self-gating
+#     -> LayerNorm -> (B, d_model) residual.
+#   - Add the residual to the pooled output BEFORE the classifier.
+#
+# Orthogonality:
+#   - Pure additive residual: model can learn the gate to 0 if useless
+#     (downside-bounded; recovers baseline behavior).
+#   - Does not touch T, num_queries, NS layout, embedding tables.
+#   - Stacks cleanly with mixed / hash / paired / din / senet for final
+#     integration round (din is the n2s direction, this is s2n -> the
+#     two together = full InterFormer "int" mode).
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 5 \
     --item_ns_tokens 2 \
     --num_queries 2 \
+    --use_cross_arch \
+    --cross_arch_recent_k 8 \
     --ns_groups_json "" \
     --emb_skip_threshold 1000000 \
     --num_workers 8 \
