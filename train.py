@@ -194,6 +194,17 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # DIN-style item-aware cross-attention as a parallel residual head.
+    parser.add_argument('--use_din_attention', action='store_true', default=False,
+                        help='Enable DIN-style item-aware cross-attention: '
+                             'item NS tokens query the raw seq tokens of each '
+                             'domain, pooled and projected to a residual that '
+                             'is ADDED to the pooled output before the '
+                             'classifier. Pure additive, no T-constraint impact.')
+    parser.add_argument('--no_din_attention', dest='use_din_attention',
+                        action='store_false',
+                        help='Disable DIN-style attention')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +312,7 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_din_attention": args.use_din_attention,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
