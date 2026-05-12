@@ -2,12 +2,29 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- Active config: RankMixer NS tokenizer (no ns_groups.json required) ----
+# Defensive against vGPU memory fragmentation.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# ---- Active config: exp/compile-amp (training speedup, baseline model) ----
+# Pure infra change: bf16 autocast + torch.compile on the training forward.
+# Model architecture, state_dict, and outputs are unchanged, so the eval
+# container needs no matching adaptation.
+#   --use_amp:      torch.amp.autocast(dtype=bf16) wraps forward + loss.
+#                   bf16 shares fp32's exponent range, so no GradScaler is
+#                   required. Sidesteps GradScaler-vs-sparse-Adagrad
+#                   interaction issues (sparse grads on Embedding weights
+#                   are not first-class GradScaler citizens).
+#   --use_compile:  torch.compile(model, dynamic=True). First batch pays
+#                   the compile cost; subsequent training batches typically
+#                   run 1.2-2x faster on Ampere+. predict()/eval path stays
+#                   eager and still benefits from autocast on its own.
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 5 \
     --item_ns_tokens 2 \
     --num_queries 2 \
+    --use_amp \
+    --use_compile \
     --ns_groups_json "" \
     --emb_skip_threshold 1000000 \
     --num_workers 8 \

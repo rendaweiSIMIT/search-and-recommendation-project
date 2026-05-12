@@ -194,6 +194,18 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Training speedups (architecture-preserving, eval container needs no change).
+    parser.add_argument('--use_amp', action='store_true', default=False,
+                        help='Wrap forward + loss in torch.amp.autocast with '
+                             'bfloat16. No GradScaler is needed because bf16 '
+                             'shares fp32 exponent range. Saved checkpoints '
+                             'are bit-identical in dtype to a non-AMP run.')
+    parser.add_argument('--use_compile', action='store_true', default=False,
+                        help='Wrap the training forward in torch.compile '
+                             '(dynamic=True). The predict()/eval path stays '
+                             'eager. First batch pays compilation overhead; '
+                             'subsequent batches typically run 1.2-2x faster.')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -350,6 +362,8 @@ def main() -> None:
         ns_groups_path=args.ns_groups_json if args.ns_groups_json and os.path.exists(args.ns_groups_json) else None,
         eval_every_n_steps=args.eval_every_n_steps,
         train_config=vars(args),
+        use_amp=args.use_amp,
+        use_compile=args.use_compile,
     )
 
     trainer.train()
