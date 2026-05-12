@@ -194,6 +194,22 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # DIN + MLP head (Alibaba KDD 2018 architecture).
+    parser.add_argument('--use_din_real', action='store_true', default=False,
+                        help='Enable the real DIN attention + MLP fusion '
+                             'head. Differs from exp/din-style (the failed '
+                             'first attempt) by using MLP-scored attention '
+                             '(not softmax dot product), a single candidate '
+                             'query (from item NS projection), and a fusion '
+                             'MLP that REPLACES pooled output (instead of '
+                             'additive residual). Output is consumed by the '
+                             'existing classifier head.')
+    parser.add_argument('--din_hidden_mult', type=int, default=2,
+                        help='Hidden-dim multiplier for both the DIN '
+                             'attention MLP and the fusion MLP (4*D -> '
+                             'D*mult -> 1 for scoring; 2*D -> D*mult -> D '
+                             'for fusion).')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +317,8 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_din_real": args.use_din_real,
+        "din_hidden_mult": args.din_hidden_mult,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
