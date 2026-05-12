@@ -194,6 +194,26 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Hour-of-day NS token (absolute time feature, paired with shuffle val).
+    parser.add_argument('--use_hour', action='store_true', default=False,
+                        help='Add hour-of-day (0..23) NS token derived from '
+                             'the sample timestamp. Requires user_ns_tokens '
+                             'to be reduced by 1 so T = num_queries*S + '
+                             'num_ns stays divisible by d_model. To avoid '
+                             'the exp/hour-of-day -0.014 trap, pair with '
+                             '--shuffle_val_seed > 0 so the local val AUC '
+                             'reflects all 24 hours, not just the 9-hour '
+                             'tail that positional val exposes.')
+    parser.add_argument('--shuffle_val_seed', type=int, default=0,
+                        help='When > 0, randomly shuffle the Row Group list '
+                             '(deterministically with this seed) before '
+                             'taking the first valid_ratio fraction as val. '
+                             'Result: val RGs are scattered through the '
+                             'training time window so val covers all '
+                             'hours-of-day / days-of-week observed in '
+                             'train. 0 (default) = positional split: val '
+                             'is the contiguous last 10% of RGs.')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -249,6 +269,7 @@ def main() -> None:
         buffer_batches=args.buffer_batches,
         seed=args.seed,
         seq_max_lens=seq_max_lens,
+        shuffle_val_seed=args.shuffle_val_seed,
     )
 
     # ---- NS groups ----
@@ -301,6 +322,7 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_hour": args.use_hour,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)

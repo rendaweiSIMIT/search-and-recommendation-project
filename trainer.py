@@ -389,6 +389,14 @@ class PCVRHyFormerRankingTrainer:
             seq_time_buckets[domain] = device_batch.get(
                 f'{domain}_time_bucket',
                 torch.zeros(B, L, dtype=torch.long, device=self.device))
+        # Forward all known synthesized context features. Each one is only
+        # consumed by the model when its corresponding flag (e.g. use_hour)
+        # is on; emitting them unconditionally keeps the batch -> ModelInput
+        # contract identical between training and the eval container.
+        context_feats: Dict[str, torch.Tensor] = {}
+        for key in ('ctx_hour',):
+            if key in device_batch:
+                context_feats[key] = device_batch[key]
         return ModelInput(
             user_int_feats=device_batch['user_int_feats'],
             item_int_feats=device_batch['item_int_feats'],
@@ -397,6 +405,7 @@ class PCVRHyFormerRankingTrainer:
             seq_data=seq_data,
             seq_lens=seq_lens,
             seq_time_buckets=seq_time_buckets,
+            context_feats=context_feats or None,
         )
 
     def _train_step(self, batch: Dict[str, Any]) -> float:
