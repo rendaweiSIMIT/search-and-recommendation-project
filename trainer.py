@@ -58,6 +58,8 @@ class PCVRHyFormerRankingTrainer:
         ns_groups_path: Optional[str] = None,
         eval_every_n_steps: int = 0,
         train_config: Optional[Dict[str, Any]] = None,
+        use_delay_aux: bool = False,
+        delay_aux_weight: float = 0.1,
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
@@ -107,6 +109,17 @@ class PCVRHyFormerRankingTrainer:
         self.ckpt_params: Dict[str, Any] = ckpt_params or {}
         self.eval_every_n_steps: int = eval_every_n_steps
         self.train_config: Optional[Dict[str, Any]] = train_config
+        # Conversion-delay auxiliary task plumbing. ``use_delay_aux`` only
+        # activates the loss path; the model itself must also have
+        # ``use_delay_aux=True`` for the head to exist. Both flags carry
+        # through ``train_config.json`` so the eval container builds the
+        # matching state_dict shape.
+        self.use_delay_aux: bool = bool(use_delay_aux)
+        self.delay_aux_weight: float = float(delay_aux_weight)
+        if self.use_delay_aux:
+            logging.info(
+                f"Delay aux loss enabled: alpha={self.delay_aux_weight}, "
+                f"only positive samples contribute, MSE on log(delay).")
 
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
@@ -409,13 +422,31 @@ class PCVRHyFormerRankingTrainer:
             self.sparse_optimizer.zero_grad()
 
         model_input = self._make_model_input(device_batch)
-        logits = self.model(model_input)  # (B, 1)
+        if self.use_delay_aux:
+            logits, aux = self.model(model_input, return_aux=True)
+        else:
+            logits = self.model(model_input)
+            aux = {}
         logits = logits.squeeze(-1)  # (B,)
 
         if self.loss_type == 'focal':
             loss = sigmoid_focal_loss(logits, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
         else:
             loss = F.binary_cross_entropy_with_logits(logits, label)
+
+        # Delay-aux MSE loss on positive samples only. When the batch
+        # happens to have zero positives, skip without contributing -- a
+        # zero-positive batch is roughly 90.4% of all batches at the
+        # baseline positive rate (9.6%) on a 256-batch run, so this
+        # branch is hit constantly but is cheap (one mask + sum).
+        if self.use_delay_aux and 'delay_pred' in aux:
+            pos_mask = label > 0.5
+            n_pos = int(pos_mask.sum().item())
+            if n_pos > 0:
+                log_delay_target = device_batch['log_delay'][pos_mask]
+                delay_pred_pos = aux['delay_pred'][pos_mask]
+                delay_loss = F.mse_loss(delay_pred_pos, log_delay_target)
+                loss = loss + self.delay_aux_weight * delay_loss
         loss.backward()
         # foreach=False: avoids a PyTorch _foreach_norm CUDA kernel bug observed
         # with certain tensor shapes in this project.

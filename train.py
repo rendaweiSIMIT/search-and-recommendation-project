@@ -194,6 +194,26 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Conversion-delay auxiliary task (multi-task learning a la ESMM/MMOE).
+    parser.add_argument('--use_delay_aux', action='store_true', default=False,
+                        help='Add a small MLP head that predicts log(label_time'
+                             ' - timestamp) from the pooled vector and train it'
+                             ' jointly via MSE on positive samples. label_time'
+                             ' is hidden in eval data, so the head only runs at'
+                             ' training time and is never queried at inference'
+                             ' -- zero leakage. EDA showed label_time has the'
+                             ' strongest single-feature signal in the dataset'
+                             ' (1-D AUC ~0.595); this branch piggy-backs on'
+                             ' that signal via aux supervision.')
+    parser.add_argument('--delay_aux_weight', type=float, default=0.1,
+                        help='Mixing coefficient alpha for the delay MSE loss:'
+                             ' total = BCE + alpha * MSE_on_pos. 0.1 is a safe'
+                             ' default; try 0.05 / 0.2 / 0.5 if the delay loss'
+                             ' starves the main BCE or vice versa.')
+    parser.add_argument('--delay_aux_hidden_mult', type=int, default=2,
+                        help='Hidden-dim multiplier for the delay head MLP'
+                             ' (d_model -> mult*d_model -> 1).')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +321,8 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_delay_aux": args.use_delay_aux,
+        "delay_aux_hidden_mult": args.delay_aux_hidden_mult,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
@@ -350,6 +372,8 @@ def main() -> None:
         ns_groups_path=args.ns_groups_json if args.ns_groups_json and os.path.exists(args.ns_groups_json) else None,
         eval_every_n_steps=args.eval_every_n_steps,
         train_config=vars(args),
+        use_delay_aux=args.use_delay_aux,
+        delay_aux_weight=args.delay_aux_weight,
     )
 
     trainer.train()
