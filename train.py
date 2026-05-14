@@ -38,6 +38,40 @@ def build_feature_specs(
     return specs
 
 
+def _resolve_explicit_int_specs(
+    schema: FeatureSchema,
+    vocab_sizes: List[int],
+    fids_str: str,
+    label: str,
+) -> List[Tuple[int, int, int]]:
+    """Translate a comma-separated list of fids (e.g. "1,13") into the
+    ``(vocab_size, offset, length)`` triple needed by
+    ``PCVRHyFormer.explicit_user_int_specs`` /
+    ``explicit_item_int_specs``. Unknown fids are warned and skipped so
+    that schema mismatches at submission time degrade gracefully (the
+    adapter becomes a no-op for the missing fid).
+    """
+    if not fids_str:
+        return []
+    try:
+        fids = [int(x.strip()) for x in fids_str.split(',') if x.strip()]
+    except ValueError:
+        logging.warning(f"Could not parse {label}={fids_str!r}, disabling")
+        return []
+    out: List[Tuple[int, int, int]] = []
+    for fid in fids:
+        if fid not in schema._fid_to_entry:
+            logging.warning(f"{label}={fid} not in {label}_schema; skipping")
+            continue
+        offset, length = schema.get_offset_length(fid)
+        vs = max(vocab_sizes[offset:offset + length])
+        out.append((int(vs), int(offset), int(length)))
+    if out:
+        logging.info(f"{label} resolved: fids={fids} -> "
+                     f"(vocab_size, offset, length) tuples={out}")
+    return out
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="PCVRHyFormer Training")
 
@@ -194,6 +228,26 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Explicit int-feature adapters (exp/feat-int-adapter family).
+    # Each listed fid gets a dedicated d_model-wide Embedding + 1-layer
+    # adapter whose output is summed as a residual into the pooled
+    # output before the classifier. Same recipe pretrained-mixed used
+    # for dense fid 61 / 87 (the +0.0039 winner), but here applied to
+    # scalar int fids whose 1-D AUC EDA showed are buried by the
+    # RankMixer concat-and-split tokenizer.
+    parser.add_argument('--explicit_user_int_fids', type=str, default='',
+                        help='Comma-separated user_int fids that get a '
+                             'dedicated embedding + adapter -> additive '
+                             'residual to pooled output. Top EDA '
+                             'candidate: fid 1 (1-D AUC 0.541, signal '
+                             '0.082).')
+    parser.add_argument('--explicit_item_int_fids', type=str, default='',
+                        help='Comma-separated item_int fids that get a '
+                             'dedicated embedding + adapter -> additive '
+                             'residual to pooled output. Top EDA '
+                             'candidate: fid 13 (1-D AUC 0.561, signal '
+                             '0.123).')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +355,18 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "explicit_user_int_specs": _resolve_explicit_int_specs(
+            pcvr_dataset.user_int_schema,
+            pcvr_dataset.user_int_vocab_sizes,
+            args.explicit_user_int_fids,
+            'explicit_user_int',
+        ),
+        "explicit_item_int_specs": _resolve_explicit_int_specs(
+            pcvr_dataset.item_int_schema,
+            pcvr_dataset.item_int_vocab_sizes,
+            args.explicit_item_int_fids,
+            'explicit_item_int',
+        ),
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
