@@ -194,6 +194,18 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Per-event hour-of-day enrichment for seq tokens (exp/event-hour-seq).
+    parser.add_argument('--use_event_hour', action='store_true', default=False,
+                        help='Add an additive 25-class embedding (0=pad, '
+                             '1-24 = hour 0-23) to every seq token, derived '
+                             'from the event\'s own timestamp. Distinct from '
+                             'sample-side hour-of-day (the absolute clock at '
+                             'impression time) -- this signal lives inside '
+                             'the user\'s past behavior, so its distribution '
+                             'does not shift between train and the platform\'s '
+                             'narrow Mon 00:01-01:30 test window. Models the '
+                             'user\'s lifestyle / activity-time pattern.')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +313,7 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_event_hour": args.use_event_hour,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
