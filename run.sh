@@ -40,6 +40,7 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --num_queries 2 \
     --num_epochs 4 \
     --valid_ratio 0 \
+    --seed 42 \
     --ns_groups_json "" \
     --emb_skip_threshold 1000000 \
     --num_workers 8 \
