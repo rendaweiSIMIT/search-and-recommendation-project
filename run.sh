@@ -5,36 +5,38 @@ export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 # Defensive against vGPU memory fragmentation.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# ---- Active config: exp/feat-item-int-13 ----
-# Explicit adapter for item_int_feats_13 (EDA Top 1-D AUC 0.5616,
-# signal 0.123 -- the strongest scalar int feature in the dataset).
+# ---- Active config: exp/feat-user-int-1 ----
+# Explicit adapter for user_int_feats_1 (EDA 1-D AUC 0.5410, signal
+# 0.082 -- the strongest scalar user_int feature; second only to
+# item_int_13 in the scalar-int leaderboard).
 #
 # Motivation:
-#   The baseline's RankMixerNSTokenizer concatenates all 14 item_int
-#   fid embeddings (14 * 64 = 896 dims) into one long vector, then
-#   splits it into 2 chunks of 448 dims each, then projects each
-#   chunk to d_model=64. Any single fid contributes only ~64/896 ~ 7%
-#   of the input dimension to one chunk -- the signal is diluted.
-#   exp/pretrained-mixed already proved (and won +0.0039) that giving
-#   a high-signal feature its own dedicated d_model-wide path beats
-#   leaving it buried. This branch applies the same idea to the
-#   strongest scalar int feature instead of a pretrained dense.
+#   Same dilution argument as exp/feat-item-int-13, applied on the user
+#   side. The baseline RankMixerNSTokenizer concatenates all 46
+#   user_int fid embeddings (46 * 64 = 2944 dim) into one long vector,
+#   then splits it into 5 chunks of 589 dim each, then projects each
+#   chunk to d_model=64. Any single fid contributes only ~64/2944 ~
+#   2% of the input dimension to one chunk -- the dilution is even
+#   more severe on the user side than the item side (because there
+#   are 46 user fids vs 14 item fids).
 #
 # Architecture:
-#   item_int_feats[:, item_int_13_offset]  (scalar 0-8, 9 unique)
-#       -> dedicated nn.Embedding(10, 64, padding_idx=0)
+#   user_int_feats[:, user_int_1_offset]  (scalar 0-5, 6 unique)
+#       -> dedicated nn.Embedding(7, 64, padding_idx=0)
 #       -> Linear(64, 64) + LayerNorm
 #       -> additive residual to pooled output (B, 64)
 #       -> classifier
 #
-# Trained for 4 epochs on 100% of data, no validation, seed 42
-# (per feedback_kdd_fixed_4_epoch). Final ckpt auto-marked .best_model.
+# This is a sibling experiment to exp/feat-item-int-13: same infra,
+# different fid. Running both lets us see whether the explicit-adapter
+# recipe transfers across user_int / item_int and across signal
+# magnitudes (0.082 vs 0.123).
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 5 \
     --item_ns_tokens 2 \
     --num_queries 2 \
-    --explicit_item_int_fids 13 \
+    --explicit_user_int_fids 1 \
     --num_epochs 4 \
     --valid_ratio 0 \
     --seed 42 \
