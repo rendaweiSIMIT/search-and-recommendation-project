@@ -2,12 +2,44 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- Active config: RankMixer NS tokenizer (no ns_groups.json required) ----
+# Defensive against vGPU memory fragmentation.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# ---- Active config: exp/full-train-4ep ----
+# Baseline model (no architecture change) trained on 100% of the data
+# for exactly 4 epochs, with no validation split and the final ckpt
+# selected by convention (per feedback_kdd_fixed_4_epoch).
+#
+# Motivation:
+#   Platform line-eval AUC has historically not been well predicted by
+#   the training-time val AUC. The hour-shuffle-val run -- 0.8672 on
+#   val vs 0.7946 on the platform -- was the breaking-point example.
+#   Multiple runs have shown that picking the ckpt at the end of
+#   epoch 4 (independent of val signal) is a reliable rule for this
+#   competition's narrow test window (Mon 00:01-01:30 immediately
+#   after the training data ends).
+#
+# Concretely:
+#   --num_epochs 4   : stop after the 4th epoch regardless of val.
+#   --valid_ratio 0  : disable validation entirely; train on every
+#                      Row Group (100% of the data). dataset.py now
+#                      returns valid_loader=None when valid_ratio<=0,
+#                      and trainer.py skips evaluate()/EarlyStopping
+#                      and saves one ckpt per epoch.
+#
+# Checkpoint layout produced by this run:
+#   $TRAIN_CKPT_PATH/global_step{S1}.layer=2.head=4.hidden=64/
+#   $TRAIN_CKPT_PATH/global_step{S2}.layer=2.head=4.hidden=64/
+#   $TRAIN_CKPT_PATH/global_step{S3}.layer=2.head=4.hidden=64/
+#   $TRAIN_CKPT_PATH/global_step{S4}.layer=2.head=4.hidden=64.best_model/
+# Pick the .best_model directory on the Model Management page for eval.
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 5 \
     --item_ns_tokens 2 \
     --num_queries 2 \
+    --num_epochs 4 \
+    --valid_ratio 0 \
     --ns_groups_json "" \
     --emb_skip_threshold 1000000 \
     --num_workers 8 \

@@ -39,7 +39,7 @@ class PCVRHyFormerRankingTrainer:
         self,
         model: nn.Module,
         train_loader: DataLoader,
-        valid_loader: DataLoader,
+        valid_loader: Optional[DataLoader],
         lr: float,
         num_epochs: int,
         device: str,
@@ -61,7 +61,12 @@ class PCVRHyFormerRankingTrainer:
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
-        self.valid_loader: DataLoader = valid_loader
+        # ``valid_loader`` may be None when valid_ratio=0 is set in
+        # get_pcvr_data (the "no-val, full-data, fixed-epoch" mode --
+        # see feedback_kdd_fixed_4_epoch). The trainer skips evaluate()
+        # and EarlyStopping in that case and saves one checkpoint per
+        # epoch via _save_step_checkpoint.
+        self.valid_loader: Optional[DataLoader] = valid_loader
         self.writer = writer
         # schema_path is copied alongside every checkpoint so that infer.py can
         # rebuild the exact same feature schema the model was trained with.
@@ -111,6 +116,11 @@ class PCVRHyFormerRankingTrainer:
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
                      f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}")
+        if self.valid_loader is None:
+            logging.info(
+                "No-val mode: trainer will train for the full num_epochs "
+                "without validation, save one ckpt per epoch (final epoch "
+                "gets the .best_model suffix), and skip EarlyStopping.")
 
     def _build_step_dir_name(self, global_step: int, is_best: bool = False) -> str:
         """Build a checkpoint sub-directory name such as
@@ -310,8 +320,11 @@ class PCVRHyFormerRankingTrainer:
 
                 train_pbar.set_postfix({"loss": f"{loss:.4f}"})
 
-                # Step-level validation (only when eval_every_n_steps > 0).
-                if self.eval_every_n_steps > 0 and total_step % self.eval_every_n_steps == 0:
+                # Step-level validation (only when eval_every_n_steps > 0
+                # AND we have a valid_loader; no-val mode skips this).
+                if (self.eval_every_n_steps > 0
+                        and self.valid_loader is not None
+                        and total_step % self.eval_every_n_steps == 0):
                     logging.info(f"Evaluating at step {total_step}")
                     val_auc, val_logloss = self.evaluate(epoch=epoch)
                     self.model.train()
@@ -331,21 +344,46 @@ class PCVRHyFormerRankingTrainer:
 
             logging.info(f"Epoch {epoch}, Average Loss: {loss_sum / len(self.train_loader)}")
 
-            val_auc, val_logloss = self.evaluate(epoch=epoch)
-            self.model.train()
-            torch.cuda.empty_cache()
+            if self.valid_loader is not None:
+                # Standard validation + EarlyStopping path (baseline behavior).
+                val_auc, val_logloss = self.evaluate(epoch=epoch)
+                self.model.train()
+                torch.cuda.empty_cache()
 
-            logging.info(f"Epoch {epoch} Validation | AUC: {val_auc}, LogLoss: {val_logloss}")
+                logging.info(
+                    f"Epoch {epoch} Validation | AUC: {val_auc}, "
+                    f"LogLoss: {val_logloss}")
 
-            if self.writer:
-                self.writer.add_scalar('AUC/valid', val_auc, total_step)
-                self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
+                if self.writer:
+                    self.writer.add_scalar('AUC/valid', val_auc, total_step)
+                    self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
 
-            self._handle_validation_result(total_step, val_auc, val_logloss)
+                self._handle_validation_result(total_step, val_auc, val_logloss)
 
-            if self.early_stopping.early_stop:
-                logging.info(f"Early stopping at epoch {epoch}")
-                break
+                if self.early_stopping.early_stop:
+                    logging.info(f"Early stopping at epoch {epoch}")
+                    break
+            else:
+                # No-val mode (valid_loader=None): trainer is configured to
+                # train for exactly num_epochs and pick the final ckpt by
+                # convention (see feedback_kdd_fixed_4_epoch). Save the
+                # checkpoint at the end of every epoch; mark the final one
+                # with the `.best_model` suffix so the platform Model
+                # Management page highlights it by default. Earlier
+                # checkpoints are retained for rollback / debugging.
+                is_final = (epoch == self.num_epochs)
+                ckpt_dir = self._save_step_checkpoint(
+                    total_step, is_best=is_final, skip_model_file=False)
+                logging.info(
+                    f"Epoch {epoch} ckpt saved to {ckpt_dir} "
+                    f"(no-val mode; is_final={is_final})")
+                # Mirror the validation-AUC tensorboard event with NaN so
+                # the chart stays present (downstream dashboards expect a
+                # series per training run). Optional; comment out if it
+                # confuses downstream tooling.
+                if self.writer:
+                    self.writer.add_scalar(
+                        'AUC/valid', float('nan'), total_step)
 
             # After the configured epoch, reinitialize high-cardinality sparse
             # params (Embeddings) as a form of cold restart to reduce overfit.
