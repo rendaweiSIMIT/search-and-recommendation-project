@@ -5,39 +5,36 @@ export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 # Defensive against vGPU memory fragmentation.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# ---- Active config: exp/full-train-4ep ----
-# Baseline model (no architecture change) trained on 100% of the data
-# for exactly 4 epochs, with no validation split and the final ckpt
-# selected by convention (per feedback_kdd_fixed_4_epoch).
+# ---- Active config: exp/feat-item-int-13 ----
+# Explicit adapter for item_int_feats_13 (EDA Top 1-D AUC 0.5616,
+# signal 0.123 -- the strongest scalar int feature in the dataset).
 #
 # Motivation:
-#   Platform line-eval AUC has historically not been well predicted by
-#   the training-time val AUC. The hour-shuffle-val run -- 0.8672 on
-#   val vs 0.7946 on the platform -- was the breaking-point example.
-#   Multiple runs have shown that picking the ckpt at the end of
-#   epoch 4 (independent of val signal) is a reliable rule for this
-#   competition's narrow test window (Mon 00:01-01:30 immediately
-#   after the training data ends).
+#   The baseline's RankMixerNSTokenizer concatenates all 14 item_int
+#   fid embeddings (14 * 64 = 896 dims) into one long vector, then
+#   splits it into 2 chunks of 448 dims each, then projects each
+#   chunk to d_model=64. Any single fid contributes only ~64/896 ~ 7%
+#   of the input dimension to one chunk -- the signal is diluted.
+#   exp/pretrained-mixed already proved (and won +0.0039) that giving
+#   a high-signal feature its own dedicated d_model-wide path beats
+#   leaving it buried. This branch applies the same idea to the
+#   strongest scalar int feature instead of a pretrained dense.
 #
-# Concretely:
-#   --num_epochs 4   : stop after the 4th epoch regardless of val.
-#   --valid_ratio 0  : disable validation entirely; train on every
-#                      Row Group (100% of the data). dataset.py now
-#                      returns valid_loader=None when valid_ratio<=0,
-#                      and trainer.py skips evaluate()/EarlyStopping
-#                      and saves one ckpt per epoch.
+# Architecture:
+#   item_int_feats[:, item_int_13_offset]  (scalar 0-8, 9 unique)
+#       -> dedicated nn.Embedding(10, 64, padding_idx=0)
+#       -> Linear(64, 64) + LayerNorm
+#       -> additive residual to pooled output (B, 64)
+#       -> classifier
 #
-# Checkpoint layout produced by this run:
-#   $TRAIN_CKPT_PATH/global_step{S1}.layer=2.head=4.hidden=64/
-#   $TRAIN_CKPT_PATH/global_step{S2}.layer=2.head=4.hidden=64/
-#   $TRAIN_CKPT_PATH/global_step{S3}.layer=2.head=4.hidden=64/
-#   $TRAIN_CKPT_PATH/global_step{S4}.layer=2.head=4.hidden=64.best_model/
-# Pick the .best_model directory on the Model Management page for eval.
+# Trained for 4 epochs on 100% of data, no validation, seed 42
+# (per feedback_kdd_fixed_4_epoch). Final ckpt auto-marked .best_model.
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 5 \
     --item_ns_tokens 2 \
     --num_queries 2 \
+    --explicit_item_int_fids 13 \
     --num_epochs 4 \
     --valid_ratio 0 \
     --seed 42 \
