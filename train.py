@@ -194,6 +194,18 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Hash-trick rescue for high-cardinality seq features.
+    # 0 = baseline behavior (skip embedding for vocab > emb_skip_threshold,
+    # emit zero vector). >0 = build a small ``seq_hash_size``-bucket table
+    # and look up ((id - 1) % seq_hash_size + 1) instead. This branch
+    # (exp/seq-c47-id-hash) uses 1M to give c_seq_47 (max ~86M, item_id
+    # history) a tighter collision ratio than the seq-hash winner (100K).
+    parser.add_argument('--seq_hash_size', type=int, default=0,
+                        help='Bucket count for hash-trick rescue of '
+                             'high-cardinality seq features. 0 = skip, '
+                             'mirror baseline. 1000000 = used in this branch '
+                             'to rescue c_seq_47 specifically.')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +313,7 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "seq_hash_size": args.seq_hash_size,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
