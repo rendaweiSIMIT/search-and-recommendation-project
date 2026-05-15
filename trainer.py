@@ -58,6 +58,7 @@ class PCVRHyFormerRankingTrainer:
         ns_groups_path: Optional[str] = None,
         eval_every_n_steps: int = 0,
         train_config: Optional[Dict[str, Any]] = None,
+        save_every_epoch: bool = False,
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
@@ -107,6 +108,11 @@ class PCVRHyFormerRankingTrainer:
         self.ckpt_params: Dict[str, Any] = ckpt_params or {}
         self.eval_every_n_steps: int = eval_every_n_steps
         self.train_config: Optional[Dict[str, Any]] = train_config
+        # When True, save the current model after every epoch into a
+        # distinct ``epoch{ep}.layer=X.head=Y.hidden=Z`` directory
+        # regardless of validation outcome. Used during finetune so a
+        # platform-better-but-val-worse epoch is never lost.
+        self.save_every_epoch: bool = save_every_epoch
 
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
@@ -202,6 +208,26 @@ class PCVRHyFormerRankingTrainer:
         for old_dir in glob.glob(pattern):
             shutil.rmtree(old_dir)
             logging.info(f"Removed old best_model dir: {old_dir}")
+
+    def _save_epoch_checkpoint(self, epoch: int) -> str:
+        """Save the current model state into a per-epoch directory.
+
+        Independent of EarlyStopping / best-model tracking: when
+        ``save_every_epoch=True`` (finetune mode), every epoch's
+        weights are persisted so the user can pick a ckpt later by
+        some criterion other than val AUC (e.g. platform leaderboard).
+        """
+        parts = [f"epoch{epoch}"]
+        for key in ("layer", "head", "hidden"):
+            if key in self.ckpt_params:
+                parts.append(f"{key}={self.ckpt_params[key]}")
+        dir_name = ".".join(parts)
+        ckpt_dir = os.path.join(self.save_dir, dir_name)
+        os.makedirs(ckpt_dir, exist_ok=True)
+        torch.save(self.model.state_dict(), os.path.join(ckpt_dir, "model.pt"))
+        self._write_sidecar_files(ckpt_dir)
+        logging.info(f"[save_every_epoch] Saved epoch {epoch} checkpoint to {ckpt_dir}/model.pt")
+        return ckpt_dir
 
     def _batch_to_device(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         """Move all tensors in ``batch`` to ``self.device`` (``non_blocking=True``,
@@ -342,6 +368,10 @@ class PCVRHyFormerRankingTrainer:
                 self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
 
             self._handle_validation_result(total_step, val_auc, val_logloss)
+
+            # Persist a per-epoch ckpt regardless of val outcome (finetune mode).
+            if self.save_every_epoch:
+                self._save_epoch_checkpoint(epoch)
 
             if self.early_stopping.early_stop:
                 logging.info(f"Early stopping at epoch {epoch}")
