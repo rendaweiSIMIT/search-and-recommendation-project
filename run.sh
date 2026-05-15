@@ -2,7 +2,14 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- Active config: RankMixer NS tokenizer (no ns_groups.json required) ----
+# ---- exp/feat-item-int-12-solo: explicit adapter for item_int_feats_12 ----
+# EDA (HANDOFF §4.6.5) shows item_int_feats_12 has 1-D AUC 0.4679
+# (signal 0.064, negative correlation). Rank #18 by signal among
+# scalar features, 3rd-strongest scalar item_int. Range [-1, 2442]
+# (the -1 maps to 0 padding in the dataset pipeline). Same dilution
+# argument as the other item_int solos. Recipe identical: dedicated
+# 64-d Embedding + 1-layer adapter -> additive residual to pooled
+# output before the classifier.
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 5 \
@@ -11,18 +18,5 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_groups_json "" \
     --emb_skip_threshold 1000000 \
     --num_workers 8 \
+    --explicit_item_int_fids 12 \
     "$@"
-
-# ---- Alternative config: GroupNSTokenizer driven by ns_groups.json ----
-# Uses feature grouping from ns_groups.json (7 user groups + 4 item groups).
-# With d_model=64 and num_ns=12 (7 user_int + 1 user_dense + 4 item_int),
-# only num_queries=1 satisfies d_model % T == 0 (T = num_queries*4 + num_ns).
-# To switch, comment out the block above and uncomment the block below.
-#
-# python3 -u "${SCRIPT_DIR}/train.py" \
-#     --ns_tokenizer_type group \
-#     --ns_groups_json "${SCRIPT_DIR}/ns_groups.json" \
-#     --num_queries 1 \
-#     --emb_skip_threshold 1000000 \
-#     --num_workers 8 \
-#     "$@"
