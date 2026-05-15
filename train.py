@@ -194,6 +194,19 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Low-cardinality seq histogram features (exp/feat-low-card-seq-hist).
+    # When set, dataset.py computes per-user normalized value histograms
+    # for the (domain, fid, K) triples listed in
+    # ``LOW_CARD_HIST_SPECS`` and appends them to user_dense_feats so they
+    # flow through user_dense_proj. No model.py change required: the
+    # extended ``user_dense_schema.total_dim`` propagates via model_args.
+    parser.add_argument('--use_low_card_seq_hist', action='store_true', default=False,
+                        help='Append per-user normalized value histograms for '
+                             '3 low-cardinality seq fids (c_seq_28 / a_seq_40 / '
+                             'c_seq_33) to user_dense_feats. Adds 94 dense dims '
+                             'and zero model parameters; works through the '
+                             'existing user_dense_proj.')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -249,6 +262,7 @@ def main() -> None:
         buffer_batches=args.buffer_batches,
         seed=args.seed,
         seq_max_lens=seq_max_lens,
+        use_low_card_seq_hist=args.use_low_card_seq_hist,
     )
 
     # ---- NS groups ----
