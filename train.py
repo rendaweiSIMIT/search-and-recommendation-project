@@ -194,6 +194,12 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # User-side sample-time encoding (exp/user-time-encoding).
+    parser.add_argument('--use_user_time_encoding', action='store_true', default=False,
+                        help='Derive (hour, weekday, sin/cos cyclical) from the '
+                             'impression `timestamp` and additively inject into '
+                             'every user NS token. No change to seq-side tokens.')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -301,6 +307,7 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_user_time_encoding": args.use_user_time_encoding,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)

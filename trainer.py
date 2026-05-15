@@ -397,6 +397,8 @@ class PCVRHyFormerRankingTrainer:
             seq_data=seq_data,
             seq_lens=seq_lens,
             seq_time_buckets=seq_time_buckets,
+            sample_time_hour=device_batch.get('sample_time_hour'),
+            sample_time_weekday=device_batch.get('sample_time_weekday'),
         )
 
     def _train_step(self, batch: Dict[str, Any]) -> float:

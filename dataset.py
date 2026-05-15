@@ -570,6 +570,15 @@ class PCVRParquetDataset(IterableDataset):
             padded = self._pad_varlen_float_column(col, dim, B)
             user_dense[:, offset:offset + dim] = padded
 
+        # Sample-level calendar-time features derived from `timestamp`.
+        # Layout: 0 = padding/unknown; 1..24 = hour-of-day; 1..7 = weekday-period.
+        # ``weekday`` is the epoch-day-number mod 7 (epoch 1970-01-01 = Thu);
+        # not the literal weekday, but a 7-period bucket that lets the model
+        # learn weekly cyclicity. Used by the user-side time encoding adapter
+        # (see model.py `_make_sample_time_emb`).
+        sample_time_hour = (((timestamps // 3600) % 24) + 1).astype(np.int64)
+        sample_time_weekday = (((timestamps // 86400) % 7) + 1).astype(np.int64)
+
         result = {
             'user_int_feats': torch.from_numpy(user_int.copy()),
             'user_dense_feats': torch.from_numpy(user_dense.copy()),
@@ -577,6 +586,8 @@ class PCVRParquetDataset(IterableDataset):
             'item_dense_feats': torch.zeros(B, 0, dtype=torch.float32),
             'label': torch.from_numpy(labels),
             'timestamp': torch.from_numpy(timestamps),
+            'sample_time_hour': torch.from_numpy(sample_time_hour),
+            'sample_time_weekday': torch.from_numpy(sample_time_weekday),
             'user_id': user_ids,
             '_seq_domains': self.seq_domains,
         }
