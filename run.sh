@@ -2,7 +2,15 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- Active config: RankMixer NS tokenizer (no ns_groups.json required) ----
+# ---- exp/feat-item-int-6-solo: explicit adapter for item_int_feats_6 ----
+# EDA (HANDOFF §4.6.5) shows item_int_feats_6 has 1-D AUC 0.4605
+# (signal 0.079, negative correlation -- low values associate with
+# higher PCVR). Rank #14 overall in scalar 1-D AUC, top non-13 scalar
+# item_int. Range [0, 911]. Same dilution problem as fid 13: shares
+# the 896-dim concat then 448-dim chunks; effective contribution to
+# any single chunk ~7% of input.
+# Recipe identical to 13-solo: dedicated 64-d Embedding + 1-layer
+# adapter -> additive residual to pooled output.
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 5 \
@@ -11,18 +19,5 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_groups_json "" \
     --emb_skip_threshold 1000000 \
     --num_workers 8 \
+    --explicit_item_int_fids 6 \
     "$@"
-
-# ---- Alternative config: GroupNSTokenizer driven by ns_groups.json ----
-# Uses feature grouping from ns_groups.json (7 user groups + 4 item groups).
-# With d_model=64 and num_ns=12 (7 user_int + 1 user_dense + 4 item_int),
-# only num_queries=1 satisfies d_model % T == 0 (T = num_queries*4 + num_ns).
-# To switch, comment out the block above and uncomment the block below.
-#
-# python3 -u "${SCRIPT_DIR}/train.py" \
-#     --ns_tokenizer_type group \
-#     --ns_groups_json "${SCRIPT_DIR}/ns_groups.json" \
-#     --num_queries 1 \
-#     --emb_skip_threshold 1000000 \
-#     --num_workers 8 \
-#     "$@"
