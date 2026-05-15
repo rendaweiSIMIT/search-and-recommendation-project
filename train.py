@@ -14,7 +14,7 @@ import json
 import argparse
 import logging
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -194,6 +194,23 @@ def parse_args() -> argparse.Namespace:
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
 
+    # Time-of-day filter + finetune support (exp/hour01-finetune).
+    parser.add_argument('--hour_minute_filter', type=str, default='',
+                        help='Row-wise time-of-day filter in "H:MM-H:MM" format '
+                             '(inclusive). Example: "0:01-1:30" keeps only rows '
+                             'whose ``timestamp % 86400`` lies in [60, 5400]. '
+                             'Applies to both train and valid splits. Empty = no filter.')
+    parser.add_argument('--finetune_from', type=str, default='',
+                        help='Path to a model.pt produced by a prior training run. '
+                             'When set, load it into the model with strict=True '
+                             'before training begins (architecture must match).')
+    parser.add_argument('--save_every_epoch', action='store_true', default=False,
+                        help='Persist a per-epoch ckpt under '
+                             '``epoch{N}.layer=X.head=Y.hidden=Z/model.pt`` '
+                             'regardless of val outcome. Required for finetune '
+                             'runs where a later epoch may be platform-better '
+                             'but val-worse than an earlier one.')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -203,6 +220,31 @@ def parse_args() -> argparse.Namespace:
     args.tf_events_dir = os.environ.get('TRAIN_TF_EVENTS_PATH')
 
     return args
+
+
+def _parse_hour_minute_filter(spec: str) -> Optional[Tuple[int, int]]:
+    """Parse a ``"H:MM-H:MM"`` spec into ``(start_sec, end_sec)``.
+
+    Both endpoints are inclusive seconds-of-day in [0, 86399]. Returns
+    ``None`` when ``spec`` is empty.
+    """
+    if not spec:
+        return None
+    if '-' not in spec:
+        raise ValueError(f"--hour_minute_filter must contain '-' (got {spec!r})")
+    a, b = spec.split('-', 1)
+
+    def to_sec(token: str) -> int:
+        hh, mm = token.split(':')
+        h, m = int(hh), int(mm)
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError(f"--hour_minute_filter token {token!r} out of range")
+        return h * 3600 + m * 60
+
+    start_sec, end_sec = to_sec(a.strip()), to_sec(b.strip())
+    if end_sec < start_sec:
+        raise ValueError(f"--hour_minute_filter end < start: {spec!r}")
+    return (start_sec, end_sec)
 
 
 def main() -> None:
@@ -239,6 +281,10 @@ def main() -> None:
         logging.info(f"Seq max_lens override: {seq_max_lens}")
 
     logging.info("Using Parquet data format (IterableDataset)")
+    time_filter = _parse_hour_minute_filter(args.hour_minute_filter)
+    if time_filter is not None:
+        logging.info(f"Time-of-day filter active: seconds-of-day in [{time_filter[0]}, {time_filter[1]}] "
+                     f"(spec={args.hour_minute_filter!r})")
     train_loader, valid_loader, pcvr_dataset = get_pcvr_data(
         data_dir=args.data_dir,
         schema_path=schema_path,
@@ -249,6 +295,7 @@ def main() -> None:
         buffer_batches=args.buffer_batches,
         seed=args.seed,
         seq_max_lens=seq_max_lens,
+        time_of_day_filter=time_filter,
     )
 
     # ---- NS groups ----
@@ -305,6 +352,16 @@ def main() -> None:
 
     model = PCVRHyFormer(**model_args).to(args.device)
 
+    # Finetune: load a starting checkpoint with strict shape matching. Must
+    # happen after .to(device) so loaded tensors land on the same device.
+    if args.finetune_from:
+        if not os.path.isfile(args.finetune_from):
+            raise FileNotFoundError(f"--finetune_from not found: {args.finetune_from}")
+        logging.info(f"[finetune] Loading starting weights from {args.finetune_from}")
+        state_dict = torch.load(args.finetune_from, map_location=args.device)
+        model.load_state_dict(state_dict, strict=True)
+        logging.info("[finetune] State dict loaded (strict=True)")
+
     # Log model sizing info.
     num_sequences = len(pcvr_dataset.seq_domains)
     num_ns = model.num_ns
@@ -350,6 +407,7 @@ def main() -> None:
         ns_groups_path=args.ns_groups_json if args.ns_groups_json and os.path.exists(args.ns_groups_json) else None,
         eval_every_n_steps=args.eval_every_n_steps,
         train_config=vars(args),
+        save_every_epoch=args.save_every_epoch,
     )
 
     trainer.train()

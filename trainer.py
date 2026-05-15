@@ -58,6 +58,7 @@ class PCVRHyFormerRankingTrainer:
         ns_groups_path: Optional[str] = None,
         eval_every_n_steps: int = 0,
         train_config: Optional[Dict[str, Any]] = None,
+        save_every_epoch: bool = False,
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
@@ -107,6 +108,11 @@ class PCVRHyFormerRankingTrainer:
         self.ckpt_params: Dict[str, Any] = ckpt_params or {}
         self.eval_every_n_steps: int = eval_every_n_steps
         self.train_config: Optional[Dict[str, Any]] = train_config
+        # When True, save the model after every epoch into a distinct
+        # ``epoch{ep}.layer=X.head=Y.hidden=Z`` sub-directory regardless of
+        # validation outcome. Used during finetune to guarantee no epoch's
+        # weights are lost even if val AUC underperforms an earlier ckpt.
+        self.save_every_epoch: bool = save_every_epoch
 
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
@@ -192,6 +198,28 @@ class PCVRHyFormerRankingTrainer:
             torch.save(self.model.state_dict(), os.path.join(ckpt_dir, "model.pt"))
         self._write_sidecar_files(ckpt_dir)
         logging.info(f"Saved checkpoint to {ckpt_dir}/model.pt")
+        return ckpt_dir
+
+    def _save_epoch_checkpoint(self, epoch: int) -> str:
+        """Save the current model state into a per-epoch directory.
+
+        Independent of EarlyStopping / best-model tracking: when
+        ``save_every_epoch=True`` (finetune mode), every epoch's weights
+        are persisted so that the user can pick a ckpt later by some
+        criterion other than val AUC (e.g. platform leaderboard).
+
+        Returns the absolute path of the saved checkpoint directory.
+        """
+        parts = [f"epoch{epoch}"]
+        for key in ("layer", "head", "hidden"):
+            if key in self.ckpt_params:
+                parts.append(f"{key}={self.ckpt_params[key]}")
+        dir_name = ".".join(parts)
+        ckpt_dir = os.path.join(self.save_dir, dir_name)
+        os.makedirs(ckpt_dir, exist_ok=True)
+        torch.save(self.model.state_dict(), os.path.join(ckpt_dir, "model.pt"))
+        self._write_sidecar_files(ckpt_dir)
+        logging.info(f"[save_every_epoch] Saved epoch {epoch} checkpoint to {ckpt_dir}/model.pt")
         return ckpt_dir
 
     def _remove_old_best_dirs(self) -> None:
@@ -342,6 +370,10 @@ class PCVRHyFormerRankingTrainer:
                 self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
 
             self._handle_validation_result(total_step, val_auc, val_logloss)
+
+            # Persist a per-epoch ckpt regardless of val outcome (finetune mode).
+            if self.save_every_epoch:
+                self._save_epoch_checkpoint(epoch)
 
             if self.early_stopping.early_stop:
                 logging.info(f"Early stopping at epoch {epoch}")
