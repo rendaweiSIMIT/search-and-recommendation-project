@@ -39,6 +39,11 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 #   rename ``epoch{N}.layer=...`` -> ``epoch{N}.layer=....best_model``
 #   before clicking submit.
 python3 -u "${SCRIPT_DIR}/train.py" \
+    --ns_tokenizer_type rankmixer \
+    --user_ns_tokens 5 \
+    --item_ns_tokens 2 \
+    --num_queries 2 \
+    --ns_groups_json "" \
     --num_epochs 999 \
     --valid_ratio 0.1 \
     --patience 5 \
@@ -60,6 +65,11 @@ echo "[Stage 2] Finetune starting from: ${STAGE1_BEST_DIR}/model.pt"
 # Embeddings at the end of every epoch (cold-restart trick); for finetune
 # this would wipe the pretrained sparse weights we just loaded — disable.
 python3 -u "${SCRIPT_DIR}/train.py" \
+    --ns_tokenizer_type rankmixer \
+    --user_ns_tokens 5 \
+    --item_ns_tokens 2 \
+    --num_queries 2 \
+    --ns_groups_json "" \
     --num_epochs 6 \
     --valid_ratio 0.1 \
     --patience 99 \
