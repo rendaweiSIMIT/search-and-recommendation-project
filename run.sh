@@ -2,7 +2,14 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- Active config: RankMixer NS tokenizer (no ns_groups.json required) ----
+# ---- exp/v9-mixed: v9 full-stack + our exp/pretrained-mixed +0.0039 winner ----
+# Everything from v9's run.sh, unchanged, PLUS the two pretrained-embedding
+# integration paths from our exp/pretrained-mixed branch:
+#   --additive_dense_fids 61   user_dense_61 (Meta SUM)   -> additive residual
+#   --gating_dense_fids   87   user_dense_87 (Tencent LFM) -> 2*sigmoid gate
+# These operate on the pooled output right before the classifier and are
+# orthogonal to v9 (v9's UserSparseDensePair only covers fids 62-66, never
+# 61/87).
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 3 \
@@ -28,6 +35,8 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --weight_decay 0.02 \
     --loss_type bce_pairwise \
     --pairwise_lambda 0.05 \
+    --additive_dense_fids 61 \
+    --gating_dense_fids 87 \
     "$@"
 
 # ---- Alternative config: GroupNSTokenizer driven by ns_groups.json ----
