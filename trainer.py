@@ -225,9 +225,10 @@ class PCVRHyFormerRankingTrainer:
         diffs = pos_logits.unsqueeze(1) - neg_logits.unsqueeze(0)
         return F.softplus(-diffs).mean()
 
-    def _build_step_dir_name(self, global_step: int, is_best: bool = False) -> str:
+    def _build_step_dir_name(self, global_step: int, is_best: bool = False,
+                             epoch: Optional[int] = None) -> str:
         """Build a checkpoint sub-directory name such as
-        ``global_step2500.layer=2.head=4.hidden=64[.best_model]``.
+        ``global_step2500.layer=2.head=4.hidden=64[.best_model][.epochN]``.
         """
         parts = [f"global_step{global_step}"]
         for key in ("layer", "head", "hidden"):
@@ -236,6 +237,8 @@ class PCVRHyFormerRankingTrainer:
         name = ".".join(parts)
         if is_best:
             name += ".best_model"
+        if epoch is not None:
+            name += f".epoch{epoch}"
         return name
 
     def _write_sidecar_files(self, ckpt_dir: str) -> None:
@@ -285,6 +288,7 @@ class PCVRHyFormerRankingTrainer:
         global_step: int,
         is_best: bool = False,
         skip_model_file: bool = False,
+        epoch: Optional[int] = None,
     ) -> str:
         """Save ``model.pt`` plus sidecar files under a ``global_step`` sub-dir.
 
@@ -294,11 +298,14 @@ class PCVRHyFormerRankingTrainer:
             skip_model_file: if True, skip writing ``model.pt`` (because the
                 caller, e.g. EarlyStopping, has already persisted it to the
                 same path). Sidecar files are still (re)written.
+            epoch: when set, append ``.epochN`` to the directory name so the
+                per-epoch checkpoint is kept separate from the best-model one.
 
         Returns:
             The absolute path of the checkpoint directory.
         """
-        dir_name = self._build_step_dir_name(global_step, is_best=is_best)
+        dir_name = self._build_step_dir_name(
+            global_step, is_best=is_best, epoch=epoch)
         ckpt_dir = os.path.join(self.save_dir, dir_name)
         os.makedirs(ckpt_dir, exist_ok=True)
         if not skip_model_file:
@@ -376,6 +383,27 @@ class PCVRHyFormerRankingTrainer:
             self._save_step_checkpoint(
                 total_step, is_best=True, skip_model_file=True)
 
+    def _save_epoch_checkpoint(self, epoch: int, total_step: int) -> None:
+        """Save a self-contained checkpoint for *this* epoch, regardless of
+        whether it is the best-val epoch.
+
+        Validation AUC does not reliably track the real test score, so every
+        epoch's weights are kept (in their own ``.epochN`` directory, each
+        with model.pt + schema.json + train_config.json) and any of them can
+        be submitted to the test platform. EMA (shadow) weights are saved
+        when EMA is enabled, matching the best-model checkpoint, so each
+        per-epoch directory reflects deployable weights.
+        """
+        if self.ema is not None:
+            self.ema.apply_shadow(self.model)
+        try:
+            ckpt_dir = self._save_step_checkpoint(
+                total_step, is_best=False, epoch=epoch)
+        finally:
+            if self.ema is not None:
+                self.ema.restore(self.model)
+        logging.info(f"Saved per-epoch checkpoint (epoch {epoch}) to {ckpt_dir}")
+
     def train(self) -> None:
         """Main training loop: iterates over epochs, performs step-level and
         epoch-level validation, triggers EarlyStopping and the periodic sparse
@@ -434,6 +462,11 @@ class PCVRHyFormerRankingTrainer:
                 self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
 
             self._handle_validation_result(total_step, val_auc, val_logloss)
+
+            # Persist this epoch's weights so any epoch (not just best-val)
+            # can be submitted to the real test platform. Done before the
+            # early-stop break so the final epoch is captured too.
+            self._save_epoch_checkpoint(epoch, total_step)
 
             if self.early_stopping.early_stop:
                 logging.info(f"Early stopping at epoch {epoch}")
