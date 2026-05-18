@@ -233,6 +233,53 @@ class EarlyStopping:
         self.best_saved_score = score
 
 
+class ModelEMA:
+    """Exponential Moving Average of model parameters.
+
+    Maintains a shadow copy of every trainable parameter, updated each
+    training step as:  shadow = decay * shadow + (1 - decay) * param
+
+    At evaluation time, call ``apply_shadow`` to swap in the smoothed
+    weights, run validation, then ``restore`` to return to training
+    weights.
+    """
+
+    def __init__(self, model: nn.Module, decay: float = 0.999) -> None:
+        self.decay = decay
+        self.shadow: Dict[str, torch.Tensor] = {}
+        self.backup: Dict[str, torch.Tensor] = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+
+    @torch.no_grad()
+    def update(self, model: nn.Module) -> None:
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self.shadow[name].mul_(self.decay).add_(
+                    param.data, alpha=1.0 - self.decay)
+
+    def apply_shadow(self, model: nn.Module) -> None:
+        self.backup = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self.backup[name] = param.data.clone()
+                param.data.copy_(self.shadow[name])
+
+    def restore(self, model: nn.Module) -> None:
+        for name, param in model.named_parameters():
+            if name in self.backup:
+                param.data.copy_(self.backup[name])
+        self.backup = {}
+
+    def resync(self, model: nn.Module, param_ptrs: "set[int]") -> None:
+        """Re-sync shadow for re-initialized parameters (e.g. after
+        high-cardinality embedding re-init)."""
+        for name, param in model.named_parameters():
+            if param.data_ptr() in param_ptrs and name in self.shadow:
+                self.shadow[name].copy_(param.data)
+
+
 def set_seed(seed: int) -> None:
     """Seed every RNG that can influence training reproducibility.
 

@@ -5,9 +5,11 @@ uses pointwise BCE / Focal loss and evaluates Binary AUC + binary logloss.
 """
 
 import os
+import math
 import glob
 import shutil
 import logging
+from contextlib import nullcontext
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -18,7 +20,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score
 
-from utils import sigmoid_focal_loss, EarlyStopping
+from utils import sigmoid_focal_loss, EarlyStopping, ModelEMA
 from model import ModelInput
 
 
@@ -58,6 +60,14 @@ class PCVRHyFormerRankingTrainer:
         ns_groups_path: Optional[str] = None,
         eval_every_n_steps: int = 0,
         train_config: Optional[Dict[str, Any]] = None,
+        # --- New training tricks ---
+        warmup_steps: int = 0,
+        lr_schedule: str = 'none',
+        ema_decay: float = 0.0,
+        label_smoothing: float = 0.0,
+        weight_decay: float = 0.01,
+        pairwise_lambda: float = 0.05,
+        precision: str = 'auto',
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
@@ -85,13 +95,41 @@ class PCVRHyFormerRankingTrainer:
                 sparse_params, lr=sparse_lr, weight_decay=sparse_weight_decay
             )
             self.dense_optimizer: torch.optim.Optimizer = torch.optim.AdamW(
-                dense_params, lr=lr, betas=(0.9, 0.98)
+                dense_params, lr=lr, betas=(0.9, 0.98), weight_decay=weight_decay
             )
         else:
             self.sparse_optimizer = None
             self.dense_optimizer = torch.optim.AdamW(
-                model.parameters(), lr=lr, betas=(0.9, 0.98)
+                model.parameters(), lr=lr, betas=(0.9, 0.98), weight_decay=weight_decay
             )
+
+        # ---- LR Schedule (warmup + cosine annealing) ----
+        self.warmup_steps = warmup_steps
+        self.lr_schedule = lr_schedule
+        self.dense_scheduler: Optional[torch.optim.lr_scheduler.LambdaLR] = None
+        if lr_schedule == 'cosine':
+            est_total_steps = num_epochs * len(train_loader)
+            def _lr_lambda(step: int) -> float:
+                if step < warmup_steps:
+                    return step / max(1, warmup_steps)
+                progress = (step - warmup_steps) / max(1, est_total_steps - warmup_steps)
+                return max(0.05, 0.5 * (1.0 + math.cos(math.pi * progress)))
+            self.dense_scheduler = torch.optim.lr_scheduler.LambdaLR(
+                self.dense_optimizer, _lr_lambda)
+            logging.info(f"LR schedule: cosine, warmup={warmup_steps}, "
+                         f"est_total_steps={est_total_steps}")
+
+        # ---- EMA ----
+        self.ema: Optional[ModelEMA] = None
+        self.ema_decay = ema_decay
+        if ema_decay > 0:
+            self.ema = ModelEMA(model, decay=ema_decay)
+            logging.info(f"EMA enabled: decay={ema_decay}")
+
+        # ---- Label Smoothing ----
+        self.label_smoothing = label_smoothing
+        if label_smoothing > 0:
+            logging.info(f"Label smoothing: {label_smoothing}")
 
         self.num_epochs: int = num_epochs
         self.device: str = device
@@ -100,6 +138,7 @@ class PCVRHyFormerRankingTrainer:
         self.loss_type: str = loss_type
         self.focal_alpha: float = focal_alpha
         self.focal_gamma: float = focal_gamma
+        self.pairwise_lambda: float = pairwise_lambda
         self.reinit_sparse_after_epoch: int = reinit_sparse_after_epoch
         self.reinit_cardinality_threshold: int = reinit_cardinality_threshold
         self.sparse_lr: float = sparse_lr
@@ -107,10 +146,84 @@ class PCVRHyFormerRankingTrainer:
         self.ckpt_params: Dict[str, Any] = ckpt_params or {}
         self.eval_every_n_steps: int = eval_every_n_steps
         self.train_config: Optional[Dict[str, Any]] = train_config
+        self.precision: str = precision
+        self.use_amp: bool = False
+        self.amp_dtype: Optional[torch.dtype] = None
+        self.amp_device_type: str = torch.device(device).type
+        self._configure_precision(precision)
 
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
-                     f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}")
+                     f"pairwise_lambda={pairwise_lambda}, "
+                     f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}, "
+                     f"precision={self.precision}")
+
+    def _configure_precision(self, precision: str) -> None:
+        """Configure autocast precision.
+
+        bf16 autocast keeps model weights and optimizer state in fp32, while
+        running eligible forward ops in bf16 for speed on supported CUDA GPUs.
+        """
+        if precision not in {'auto', 'fp32', 'bf16'}:
+            raise ValueError(
+                f"Unsupported precision={precision!r}; expected auto, fp32, or bf16"
+            )
+
+        if precision == 'fp32':
+            logging.info("Precision: fp32 autocast disabled")
+            return
+
+        if self.amp_device_type != 'cuda':
+            if precision == 'bf16':
+                logging.warning(
+                    "Precision bf16 requested on non-CUDA device; falling back to fp32"
+                )
+            else:
+                logging.info("Precision auto: non-CUDA device, using fp32")
+            self.precision = 'fp32'
+            return
+
+        bf16_supported = False
+        if torch.cuda.is_available():
+            is_supported = getattr(torch.cuda, 'is_bf16_supported', None)
+            bf16_supported = bool(is_supported()) if is_supported is not None else False
+
+        if bf16_supported:
+            self.use_amp = True
+            self.amp_dtype = torch.bfloat16
+            self.precision = 'bf16'
+            logging.info("Precision: CUDA bf16 autocast enabled")
+        elif precision == 'bf16':
+            self.precision = 'fp32'
+            logging.warning(
+                "Precision bf16 requested but this CUDA device/PyTorch build "
+                "does not report bf16 support; falling back to fp32"
+            )
+        else:
+            self.precision = 'fp32'
+            logging.info("Precision auto: CUDA bf16 unavailable, using fp32")
+
+    def _autocast_context(self):
+        if not self.use_amp or self.amp_dtype is None:
+            return nullcontext()
+        return torch.autocast(
+            device_type=self.amp_device_type,
+            dtype=self.amp_dtype,
+            enabled=True,
+        )
+
+    def _batch_pairwise_loss(
+        self,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> torch.Tensor:
+        """Batch-internal pairwise ranking loss for AUC-oriented training."""
+        pos_logits = logits[labels > 0.5]
+        neg_logits = logits[labels <= 0.5]
+        if pos_logits.numel() == 0 or neg_logits.numel() == 0:
+            return logits.new_zeros(())
+        diffs = pos_logits.unsqueeze(1) - neg_logits.unsqueeze(0)
+        return F.softplus(-diffs).mean()
 
     def _build_step_dir_name(self, global_step: int, is_best: bool = False) -> str:
         """Build a checkpoint sub-directory name such as
@@ -223,26 +336,8 @@ class PCVRHyFormerRankingTrainer:
     ) -> None:
         """Persist a new-best checkpoint atomically.
 
-        Flow (ordered to avoid leaving empty sidecar-only directories on disk):
-
-        1. Decide whether ``val_auc`` is *likely* to beat the current best
-           using the same threshold as ``EarlyStopping._is_not_improved``,
-           so our pre-cleanup and EarlyStopping's internal save decision
-           stay in sync.
-        2. If unlikely, short-circuit: do nothing on disk. We must NOT
-           touch ``self.early_stopping.checkpoint_path`` or call
-           ``_write_sidecar_files`` because the target directory may not
-           exist yet (sidecar-only dirs would otherwise be created here,
-           producing checkpoints with missing ``model.pt``).
-        3. If likely, point ``EarlyStopping`` at the canonical
-           ``global_stepN.best_model/model.pt`` path, remove any stale
-           ``*.best_model`` dirs, then run ``EarlyStopping`` (which writes
-           ``model.pt`` when it actually confirms a new best).
-        4. Only after ``EarlyStopping`` has confirmed a new best
-           (``best_score != old_best``) do we write the sidecar files into
-           the freshly-created directory; this is guarded so that a
-           razor-close score that tripped ``is_likely_new_best`` but not
-           ``EarlyStopping``'s own gate does not create a stray dir.
+        When EMA is enabled, checkpoints are saved with EMA (shadow) weights
+        so the deployed model benefits from the smoothed parameters.
         """
         old_best = self.early_stopping.best_score
         is_likely_new_best = (
@@ -250,36 +345,31 @@ class PCVRHyFormerRankingTrainer:
             or val_auc > old_best + self.early_stopping.delta
         )
         if not is_likely_new_best:
-            # No new best anticipated: leave disk untouched. The previous
-            # best_model dir (with its model.pt + sidecars) remains valid.
             self.early_stopping(val_auc, self.model, {
                 "best_val_AUC": val_auc,
                 "best_val_logloss": val_logloss,
             })
             return
 
-        # Point EarlyStopping at the canonical best-model location for this
-        # step. Only done on the likely-new-best branch so that a skipped
-        # save never leaks the unused path into EarlyStopping state.
         best_dir = os.path.join(
             self.save_dir,
             self._build_step_dir_name(total_step, is_best=True),
         )
         self.early_stopping.checkpoint_path = os.path.join(best_dir, "model.pt")
-
-        # Remove stale best dirs first so EarlyStopping's write is the only
-        # I/O needed when a new best is confirmed.
         self._remove_old_best_dirs()
+
+        # Save EMA weights if available (better generalization)
+        if self.ema is not None:
+            self.ema.apply_shadow(self.model)
 
         self.early_stopping(val_auc, self.model, {
             "best_val_AUC": val_auc,
             "best_val_logloss": val_logloss,
         })
 
-        # Write sidecar files only when EarlyStopping actually confirmed a
-        # new best and wrote model.pt. If the score tripped our heuristic
-        # but EarlyStopping internally declined to save, skip to avoid
-        # creating an empty (sidecar-only) checkpoint directory.
+        if self.ema is not None:
+            self.ema.restore(self.model)
+
         if self.early_stopping.best_score != old_best and os.path.exists(
             self.early_stopping.checkpoint_path
         ):
@@ -307,6 +397,8 @@ class PCVRHyFormerRankingTrainer:
 
                 if self.writer:
                     self.writer.add_scalar('Loss/train', loss, total_step)
+                    if self.dense_scheduler is not None:
+                        self.writer.add_scalar('LR/dense', self.dense_scheduler.get_last_lr()[0], total_step)
 
                 train_pbar.set_postfix({"loss": f"{loss:.4f}"})
 
@@ -362,6 +454,8 @@ class PCVRHyFormerRankingTrainer:
                             old_state[p.data_ptr()] = self.sparse_optimizer.state[p]
 
                 reinit_ptrs = self.model.reinit_high_cardinality_params(self.reinit_cardinality_threshold)
+                if self.ema is not None:
+                    self.ema.resync(self.model, reinit_ptrs)
                 sparse_params = self.model.get_sparse_params()
                 self.sparse_optimizer = torch.optim.Adagrad(
                     sparse_params, lr=self.sparse_lr, weight_decay=self.sparse_weight_decay
@@ -381,6 +475,11 @@ class PCVRHyFormerRankingTrainer:
         seq_data: Dict[str, torch.Tensor] = {}
         seq_lens: Dict[str, torch.Tensor] = {}
         seq_time_buckets: Dict[str, torch.Tensor] = {}
+        seq_time_deltas: Dict[str, torch.Tensor] = {}
+        seq_time_gaps: Dict[str, torch.Tensor] = {}
+        seq_time_hours: Dict[str, torch.Tensor] = {}
+        seq_time_weekdays: Dict[str, torch.Tensor] = {}
+        seq_time_span_buckets: Dict[str, torch.Tensor] = {}
         for domain in seq_domains:
             seq_data[domain] = device_batch[domain]
             seq_lens[domain] = device_batch[f'{domain}_len']
@@ -388,6 +487,21 @@ class PCVRHyFormerRankingTrainer:
             L = device_batch[domain].shape[2]
             seq_time_buckets[domain] = device_batch.get(
                 f'{domain}_time_bucket',
+                torch.zeros(B, L, dtype=torch.long, device=self.device))
+            seq_time_deltas[domain] = device_batch.get(
+                f'{domain}_time_delta',
+                torch.zeros(B, L, dtype=torch.float, device=self.device))
+            seq_time_gaps[domain] = device_batch.get(
+                f'{domain}_time_gap',
+                torch.zeros(B, L, dtype=torch.float, device=self.device))
+            seq_time_hours[domain] = device_batch.get(
+                f'{domain}_time_hour',
+                torch.zeros(B, L, dtype=torch.long, device=self.device))
+            seq_time_weekdays[domain] = device_batch.get(
+                f'{domain}_time_weekday',
+                torch.zeros(B, L, dtype=torch.long, device=self.device))
+            seq_time_span_buckets[domain] = device_batch.get(
+                f'{domain}_time_span_bucket',
                 torch.zeros(B, L, dtype=torch.long, device=self.device))
         return ModelInput(
             user_int_feats=device_batch['user_int_feats'],
@@ -397,6 +511,11 @@ class PCVRHyFormerRankingTrainer:
             seq_data=seq_data,
             seq_lens=seq_lens,
             seq_time_buckets=seq_time_buckets,
+            seq_time_deltas=seq_time_deltas,
+            seq_time_gaps=seq_time_gaps,
+            seq_time_hours=seq_time_hours,
+            seq_time_weekdays=seq_time_weekdays,
+            seq_time_span_buckets=seq_time_span_buckets,
         )
 
     def _train_step(self, batch: Dict[str, Any]) -> float:
@@ -404,36 +523,54 @@ class PCVRHyFormerRankingTrainer:
         device_batch = self._batch_to_device(batch)
         label = device_batch['label'].float()
 
+        # Label smoothing: y' = y*(1-eps) + 0.5*eps
+        if self.label_smoothing > 0:
+            label = label * (1.0 - self.label_smoothing) + 0.5 * self.label_smoothing
+
         self.dense_optimizer.zero_grad()
         if self.sparse_optimizer is not None:
             self.sparse_optimizer.zero_grad()
 
         model_input = self._make_model_input(device_batch)
-        logits = self.model(model_input)  # (B, 1)
-        logits = logits.squeeze(-1)  # (B,)
 
+        with self._autocast_context():
+            logits = self.model(model_input).squeeze(-1)
+        logits = logits.float()
         if self.loss_type == 'focal':
             loss = sigmoid_focal_loss(logits, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+        elif self.loss_type == 'bce_pairwise':
+            bce_loss = F.binary_cross_entropy_with_logits(logits, label)
+            pairwise_loss = self._batch_pairwise_loss(logits, label)
+            loss = bce_loss + self.pairwise_lambda * pairwise_loss
         else:
             loss = F.binary_cross_entropy_with_logits(logits, label)
-        loss.backward()
-        # foreach=False: avoids a PyTorch _foreach_norm CUDA kernel bug observed
-        # with certain tensor shapes in this project.
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, foreach=False)
 
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, foreach=False)
         self.dense_optimizer.step()
         if self.sparse_optimizer is not None:
             self.sparse_optimizer.step()
+
+        # LR scheduler step (per training step)
+        if self.dense_scheduler is not None:
+            self.dense_scheduler.step()
+
+        # EMA update
+        if self.ema is not None:
+            self.ema.update(self.model)
 
         return loss.item()
 
     def evaluate(self, epoch: Optional[int] = None) -> Tuple[float, float]:
         """Run validation over ``self.valid_loader`` and return ``(AUC, logloss)``.
 
+        When EMA is enabled, evaluation uses the smoothed shadow weights.
         NaN predictions (which can arise from exploding gradients) are filtered
         out before computing both metrics.
         """
         print("Start Evaluation (PCVRHyFormer) - validation")
+        if self.ema is not None:
+            self.ema.apply_shadow(self.model)
         self.model.eval()
         if not epoch:
             epoch = -1
@@ -478,6 +615,9 @@ class PCVRHyFormerRankingTrainer:
         else:
             logloss = float('inf')
 
+        if self.ema is not None:
+            self.ema.restore(self.model)
+
         return auc, logloss
 
     def _evaluate_step(
@@ -488,7 +628,8 @@ class PCVRHyFormerRankingTrainer:
         label = device_batch['label']
 
         model_input = self._make_model_input(device_batch)
-        logits, _ = self.model.predict(model_input)  # (B, 1), (B, D)
-        logits = logits.squeeze(-1)  # (B,)
+        with self._autocast_context():
+            logits, _ = self.model.predict(model_input)  # (B, 1), (B, D)
+        logits = logits.squeeze(-1).float()  # (B,)
 
         return logits, label

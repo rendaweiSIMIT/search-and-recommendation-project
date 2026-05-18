@@ -19,9 +19,17 @@ from typing import List, Tuple
 import torch
 
 from utils import set_seed, EarlyStopping, create_logger
-from dataset import FeatureSchema, get_pcvr_data, NUM_TIME_BUCKETS
+from dataset import (
+    FeatureSchema,
+    get_pcvr_data,
+    NUM_TIME_BUCKETS,
+    NUM_TIME_SPAN_BUCKETS,
+)
 from model import PCVRHyFormer
 from trainer import PCVRHyFormerRankingTrainer
+
+
+USER_SPARSE_DENSE_PAIR_FIDS = [62, 63, 64, 65, 66]
 
 
 def build_feature_specs(
@@ -35,6 +43,27 @@ def build_feature_specs(
     for fid, offset, length in schema.entries:
         vs = max(per_position_vocab_sizes[offset:offset + length])
         specs.append((vs, offset, length))
+    return specs
+
+
+def build_user_sparse_dense_pair_specs(
+    user_int_schema: FeatureSchema,
+    user_dense_schema: FeatureSchema,
+    user_int_vocab_sizes: List[int],
+    fids: List[int] = USER_SPARSE_DENSE_PAIR_FIDS,
+) -> List[Tuple[int, int, int, int, int]]:
+    """Build paired sparse-id/float-value specs from FeatureSchema offsets."""
+    specs: List[Tuple[int, int, int, int, int]] = []
+    for fid in fids:
+        int_offset, int_length = user_int_schema.get_offset_length(fid)
+        dense_offset, dense_length = user_dense_schema.get_offset_length(fid)
+        if int_length != dense_length:
+            raise ValueError(
+                f"Paired user fid {fid} has mismatched lengths: "
+                f"user_int={int_length}, user_dense={dense_length}"
+            )
+        vs = max(user_int_vocab_sizes[int_offset:int_offset + int_length])
+        specs.append((fid, vs, int_offset, dense_offset, int_length))
     return specs
 
 
@@ -67,6 +96,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--device', type=str,
                         default='cuda' if torch.cuda.is_available() else 'cpu',
                         help='Training device, e.g. cuda or cpu')
+    parser.add_argument('--precision', type=str, default='auto',
+                        choices=['auto', 'fp32', 'bf16'],
+                        help='Training precision: auto enables bf16 autocast on '
+                             'supported CUDA GPUs, bf16 requires bf16 autocast '
+                             'with fp32 fallback when unsupported, fp32 disables '
+                             'autocast')
 
     # Data pipeline.
     parser.add_argument('--num_workers', type=int, default=16,
@@ -123,6 +158,14 @@ def parse_args() -> argparse.Namespace:
                              'dataset.BUCKET_BOUNDARIES; this flag is a pure on/off switch.')
     parser.add_argument('--no_time_buckets', dest='use_time_buckets', action='store_false',
                         help='Disable the time-bucket embedding')
+    parser.add_argument('--use_calendar_time', action='store_true', default=True,
+                        help='Enable hour/weekday embedding and cyclic sin-cos calendar time features')
+    parser.add_argument('--no_calendar_time', dest='use_calendar_time', action='store_false',
+                        help='Disable calendar-time sequence features')
+    parser.add_argument('--use_time_span_buckets', action='store_true', default=True,
+                        help='Enable discrete inter-event time-span bucket embeddings')
+    parser.add_argument('--no_time_span_buckets', dest='use_time_span_buckets', action='store_false',
+                        help='Disable inter-event time-span bucket embeddings')
     parser.add_argument('--rank_mixer_mode', type=str, default='full',
                         choices=['full', 'ffn_only', 'none'],
                         help='RankMixerBlock mode: '
@@ -135,14 +178,20 @@ def parse_args() -> argparse.Namespace:
                         help='RoPE base frequency (default 10000)')
 
     # Loss function.
-    parser.add_argument('--loss_type', type=str, default='bce', choices=['bce', 'focal'],
-                        help='Loss type: bce = BCEWithLogits, focal = Focal Loss')
+    parser.add_argument('--loss_type', type=str, default='bce',
+                        choices=['bce', 'focal', 'bce_pairwise'],
+                        help='Loss type: bce = BCEWithLogits, '
+                             'focal = Focal Loss, '
+                             'bce_pairwise = BCE + batch pairwise ranking loss')
     parser.add_argument('--focal_alpha', type=float, default=0.1,
                         help='Focal Loss positive-class weight alpha '
                              '(effective only when --loss_type=focal)')
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                         help='Focal Loss focusing parameter gamma '
                              '(effective only when --loss_type=focal)')
+    parser.add_argument('--pairwise_lambda', type=float, default=0.05,
+                        help='Weight for batch pairwise ranking loss '
+                             '(effective only when --loss_type=bce_pairwise)')
 
     # Sparse optimizer.
     parser.add_argument('--sparse_lr', type=float, default=0.05,
@@ -193,6 +242,78 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--item_ns_tokens', type=int, default=0,
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
+
+    # DCN-v2 cross network.
+    parser.add_argument('--num_cross_layers', type=int, default=0,
+                        help='Number of DCN-v2 cross layers applied to NS tokens '
+                             'before query generation (0 = disabled)')
+    parser.add_argument('--cross_low_rank', type=int, default=0,
+                        help='Low-rank factorization rank for cross layer W matrix '
+                             '(0 = full rank)')
+    parser.add_argument('--cross_dropout', type=float, default=0.1,
+                        help='Dropout rate inside cross layers (default 0.1)')
+
+    # SE-Net feature gating.
+    parser.add_argument('--use_se_net', action='store_true', default=False,
+                        help='Enable SE-Net feature gating on NS tokens')
+
+    # Hash embedding for ultra-high cardinality features.
+    parser.add_argument('--hash_bucket_size', type=int, default=100000,
+                        help='Bucket count for hash embeddings on features whose '
+                             'vocab exceeds emb_skip_threshold (0 = disabled, '
+                             'those features fall back to zero vectors)')
+
+    # Target-aware attention.
+    parser.add_argument('--use_target_attention', action='store_true', default=True,
+                        help='Enable DIN-style target-aware attention + item-conditioned '
+                             'query generation (default on)')
+    parser.add_argument('--no_target_attention', dest='use_target_attention',
+                        action='store_false',
+                        help='Disable target-aware attention')
+
+    # NS self-attention (feature crossing inside HyFormerBlocks).
+    parser.add_argument('--use_ns_self_attn', action='store_true', default=False,
+                        help='Enable self-attention among NS tokens within each '
+                             'HyFormerBlock for feature crossing')
+    parser.add_argument('--no_ns_self_attn', dest='use_ns_self_attn',
+                        action='store_false',
+                        help='Disable NS self-attention (default)')
+
+    # NS output fusion.
+    parser.add_argument('--use_ns_output_fusion', action='store_true', default=False,
+                        help='Fuse final NS tokens into output via mean-pool + '
+                             'Linear fusion layer')
+    parser.add_argument('--no_ns_output_fusion', dest='use_ns_output_fusion',
+                        action='store_false',
+                        help='Disable NS output fusion (default)')
+
+    # Temporal Attention Bias.
+    parser.add_argument('--use_temporal_bias', action='store_true', default=False,
+                        help='Enable per-head temporal decay bias in cross-attention')
+    parser.add_argument('--no_temporal_bias', dest='use_temporal_bias',
+                        action='store_false',
+                        help='Disable temporal attention bias (default)')
+
+    # Inter-event time gap.
+    parser.add_argument('--use_time_gap', action='store_true', default=False,
+                        help='Enable inter-event time gap embedding in sequences')
+    parser.add_argument('--no_time_gap', dest='use_time_gap',
+                        action='store_false',
+                        help='Disable inter-event time gap (default)')
+
+    # Training tricks.
+    parser.add_argument('--warmup_steps', type=int, default=0,
+                        help='Number of linear LR warmup steps (0 = no warmup)')
+    parser.add_argument('--lr_schedule', type=str, default='none',
+                        choices=['none', 'cosine'],
+                        help='LR schedule: none = constant, cosine = warmup + cosine decay')
+    parser.add_argument('--ema_decay', type=float, default=0.0,
+                        help='EMA decay rate for model weights (0 = disabled, '
+                             'typical: 0.999 or 0.9999)')
+    parser.add_argument('--label_smoothing', type=float, default=0.0,
+                        help='Label smoothing epsilon (0 = disabled, typical: 0.01)')
+    parser.add_argument('--weight_decay', type=float, default=0.01,
+                        help='AdamW weight decay for dense parameters')
 
     args = parser.parse_args()
 
@@ -293,6 +414,8 @@ def main() -> None:
         "seq_causal": args.seq_causal,
         "action_num": args.action_num,
         "num_time_buckets": NUM_TIME_BUCKETS if args.use_time_buckets else 0,
+        "num_time_span_buckets": NUM_TIME_SPAN_BUCKETS if args.use_time_span_buckets else 0,
+        "use_calendar_time": args.use_calendar_time,
         "rank_mixer_mode": args.rank_mixer_mode,
         "use_rope": args.use_rope,
         "rope_base": args.rope_base,
@@ -301,6 +424,21 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "num_cross_layers": args.num_cross_layers,
+        "cross_low_rank": args.cross_low_rank,
+        "cross_dropout": args.cross_dropout,
+        "use_se_net": args.use_se_net,
+        "hash_bucket_size": args.hash_bucket_size,
+        "use_target_attention": args.use_target_attention,
+        "use_ns_self_attn": args.use_ns_self_attn,
+        "use_ns_output_fusion": args.use_ns_output_fusion,
+        "use_temporal_bias": args.use_temporal_bias,
+        "use_time_gap": args.use_time_gap,
+        "user_sparse_dense_pair_specs": build_user_sparse_dense_pair_specs(
+            pcvr_dataset.user_int_schema,
+            pcvr_dataset.user_dense_schema,
+            pcvr_dataset.user_int_vocab_sizes,
+        ),
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
@@ -350,6 +488,13 @@ def main() -> None:
         ns_groups_path=args.ns_groups_json if args.ns_groups_json and os.path.exists(args.ns_groups_json) else None,
         eval_every_n_steps=args.eval_every_n_steps,
         train_config=vars(args),
+        warmup_steps=args.warmup_steps,
+        lr_schedule=args.lr_schedule,
+        ema_decay=args.ema_decay,
+        label_smoothing=args.label_smoothing,
+        weight_decay=args.weight_decay,
+        pairwise_lambda=args.pairwise_lambda,
+        precision=args.precision,
     )
 
     trainer.train()
