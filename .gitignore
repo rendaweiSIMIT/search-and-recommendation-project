@@ -8,3 +8,6 @@ runs/
 ckpt*/
 logs*/
 tb*/
+
+# Generated data artifact (built by build_id_stats.py before each run)
+id_stats.npz

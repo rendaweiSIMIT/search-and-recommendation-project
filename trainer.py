@@ -58,6 +58,7 @@ class PCVRHyFormerRankingTrainer:
         writer: Optional[Any] = None,
         schema_path: Optional[str] = None,
         ns_groups_path: Optional[str] = None,
+        id_stats_path: Optional[str] = None,
         eval_every_n_steps: int = 0,
         train_config: Optional[Dict[str, Any]] = None,
         # --- New training tricks ---
@@ -81,6 +82,10 @@ class PCVRHyFormerRankingTrainer:
         # makes the checkpoint self-contained for evaluation environments that
         # do not ship ns_groups.json separately.
         self.ns_groups_path: Optional[str] = ns_groups_path
+        # id_stats_path: optional id_stats.npz; copied into every checkpoint
+        # dir so infer.py can attach the same ID-statistic features at test
+        # time (exp/v9-mixed-dpe-id-stats).
+        self.id_stats_path: Optional[str] = id_stats_path
 
         # Dual optimizer: Adagrad for sparse Embeddings, AdamW for dense params.
         self.sparse_optimizer: Optional[torch.optim.Optimizer]
@@ -268,6 +273,12 @@ class PCVRHyFormerRankingTrainer:
         if self.ns_groups_path and os.path.exists(self.ns_groups_path):
             shutil.copy2(self.ns_groups_path, ckpt_dir)
             ns_groups_copied = True
+
+        # id_stats.npz: copied as id_stats.npz so infer.py finds it next to
+        # model.pt and re-attaches the same ID-statistic features.
+        if self.id_stats_path and os.path.exists(self.id_stats_path):
+            shutil.copy2(self.id_stats_path,
+                         os.path.join(ckpt_dir, 'id_stats.npz'))
 
         if self.train_config:
             import json
@@ -549,6 +560,7 @@ class PCVRHyFormerRankingTrainer:
             seq_time_hours=seq_time_hours,
             seq_time_weekdays=seq_time_weekdays,
             seq_time_span_buckets=seq_time_span_buckets,
+            id_stats_feats=device_batch['id_stats_feats'],
         )
 
     def _train_step(self, batch: Dict[str, Any]) -> float:

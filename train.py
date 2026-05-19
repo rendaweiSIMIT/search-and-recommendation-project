@@ -359,6 +359,13 @@ def parse_args() -> argparse.Namespace:
                              'MULTIPLIED with the pooled output (LFM4Ads-style). '
                              'Default 87 = Tencent LFM4Ads.')
 
+    # ID statistical encoding (exp/v9-mixed-dpe-id-stats).
+    parser.add_argument('--id_stats_path', type=str, default=None,
+                        help='Path to id_stats.npz (built by build_id_stats.py). '
+                             'When set, per-row item/user count + smoothed-CVR '
+                             'features are attached and fed through an adapter. '
+                             'Unset / missing file -> feature disabled.')
+
     args = parser.parse_args()
 
     # Environment variables take precedence.
@@ -414,6 +421,7 @@ def main() -> None:
         buffer_batches=args.buffer_batches,
         seed=args.seed,
         seq_max_lens=seq_max_lens,
+        id_stats_path=args.id_stats_path,
     )
 
     # ---- NS groups ----
@@ -487,6 +495,7 @@ def main() -> None:
             pcvr_dataset, args.additive_dense_fids, '--additive_dense_fids'),
         "gating_dense_offsets": _resolve_dense_fid_offsets(
             pcvr_dataset, args.gating_dense_fids, '--gating_dense_fids'),
+        "id_stats_dim": pcvr_dataset.id_stats_dim,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
@@ -534,6 +543,7 @@ def main() -> None:
         writer=writer,
         schema_path=schema_path,
         ns_groups_path=args.ns_groups_json if args.ns_groups_json and os.path.exists(args.ns_groups_json) else None,
+        id_stats_path=args.id_stats_path,
         eval_every_n_steps=args.eval_every_n_steps,
         train_config=vars(args),
         warmup_steps=args.warmup_steps,

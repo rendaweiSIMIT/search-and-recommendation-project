@@ -2,15 +2,22 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- exp/v9-mixed: v9 full-stack + our exp/pretrained-mixed +0.0039 winner ----
-# Everything from v9's run.sh, unchanged, PLUS the two pretrained-embedding
-# integration paths from our exp/pretrained-mixed branch:
-#   --additive_dense_fids 61   user_dense_61 (Meta SUM)   -> additive residual
-#   --gating_dense_fids   87   user_dense_87 (Tencent LFM) -> 2*sigmoid gate
-# These operate on the pooled output right before the classifier and are
-# orthogonal to v9 (v9's UserSparseDensePair only covers fids 62-66, never
-# 61/87).
+# ---- exp/v9-mixed-dpe-id-stats ----
+# = exp/v9-mixed-dense-proj-exclude (the confirmed test-best, 0.825572) PLUS
+#   ID statistical encoding: per-row item/user count + smoothed historical
+#   CVR scalars, fed through a dedicated adapter (residual to the pooled
+#   output, like the pretrained-dense adapters).
+#
+# Step 1: build_id_stats.py pre-computes id_stats.npz from the TRAINING Row
+#   Groups only (--valid_ratio MUST match train.py's, default 0.1). It is a
+#   pure data artifact (counts only) and is shipped inside every checkpoint.
+# Step 2: train.py consumes it via --id_stats_path; item CVR uses
+#   leave-one-out on training rows so the feature never leaks its label.
+python3 -u "${SCRIPT_DIR}/build_id_stats.py" --valid_ratio 0.1 --alpha 100 \
+    --out "${SCRIPT_DIR}/id_stats.npz"
+
 python3 -u "${SCRIPT_DIR}/train.py" \
+    --id_stats_path "${SCRIPT_DIR}/id_stats.npz" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 3 \
     --item_ns_tokens 4 \
