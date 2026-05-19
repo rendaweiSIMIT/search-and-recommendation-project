@@ -2,18 +2,17 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- exp/v9-mixed-dense-proj-exclude-fulldata ----
-# = exp/v9-mixed-dense-proj-exclude (C5: 61/87 excluded from the generic
-#   dense projection -- the confirmed test-best, 0.825572 > v9 0.824981),
-#   retrained on 100% of the data with NO validation split.
-#   --valid_ratio 0  -> get_pcvr_data uses every Row Group for training and
-#                       returns valid_loader=None; the trainer then skips
-#                       evaluate()/EarlyStopping.
-#   --num_epochs 12  -> fixed epoch count (mandatory: no early stopping).
-#                       Every epoch's weights are saved (.epochN dirs); pick
-#                       the epoch that scores best on the real test platform.
-#   --seed 3407      -> explicit seed (was relying on train.py's default 42);
-#                       passed to set_seed() and get_pcvr_data().
+# ---- exp/v9-mixed-dpe-fulldata-frontval ----
+# = the 12-epoch fulldata config, but instead of NO validation it keeps a
+#   small 5% MONITOR validation split taken from the OLDEST Row Groups:
+#   --valid_ratio 0.05 --valid_from_head
+#       val = the oldest 5% of Row Groups. This keeps the most recent
+#       (most test-relevant) data IN training, and gives the val set
+#       fully-matured (un-censored) labels -> a cleaner monitoring curve.
+#   --patience 999  -> EarlyStopping never fires; all 12 epochs are trained.
+#       The 5% val is a health monitor only, NOT an epoch selector -- pick
+#       the epoch by the cumulative-LR analysis (cosine tail, ~10-12).
+#   --num_epochs 12 / --seed 3407 / cosine: unchanged from the fulldata run.
 # Everything else is unchanged from exp/v9-mixed (v9 full-stack + our
 # pretrained-mixed: --additive_dense_fids 61 / --gating_dense_fids 87).
 python3 -u "${SCRIPT_DIR}/train.py" \
@@ -34,7 +33,9 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --use_temporal_bias \
     --use_time_gap \
     --precision bf16 \
-    --valid_ratio 0 \
+    --valid_ratio 0.05 \
+    --valid_from_head \
+    --patience 999 \
     --num_epochs 12 \
     --seed 3407 \
     --lr_schedule cosine \
