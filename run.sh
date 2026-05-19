@@ -12,6 +12,8 @@ export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 #   --num_epochs 12  -> fixed epoch count (mandatory: no early stopping).
 #                       Every epoch's weights are saved (.epochN dirs); pick
 #                       the epoch that scores best on the real test platform.
+#   --seed 3407      -> explicit seed (was relying on train.py's default 42);
+#                       passed to set_seed() and get_pcvr_data().
 # Everything else is unchanged from exp/v9-mixed (v9 full-stack + our
 # pretrained-mixed: --additive_dense_fids 61 / --gating_dense_fids 87).
 python3 -u "${SCRIPT_DIR}/train.py" \
@@ -34,6 +36,7 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --precision bf16 \
     --valid_ratio 0 \
     --num_epochs 12 \
+    --seed 3407 \
     --lr_schedule cosine \
     --warmup_steps 500 \
     --ema_decay 0.999 \
