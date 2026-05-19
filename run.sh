@@ -2,6 +2,12 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
+# Let the CUDA caching allocator grow segments on demand instead of holding
+# fixed-size blocks. Mitigates the fragmentation OOM seen at the epoch-2
+# boundary ("reserved but unallocated" memory). Must be set before torch
+# initializes CUDA, hence here at the top of run.sh.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # ---- exp/v9-mixed-dpe-id-stats ----
 # = exp/v9-mixed-dense-proj-exclude (the confirmed test-best, 0.825572) PLUS
 #   ID statistical encoding: per-row item/user count + smoothed historical
