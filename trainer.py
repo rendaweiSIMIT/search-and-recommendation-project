@@ -383,6 +383,31 @@ class PCVRHyFormerRankingTrainer:
             self._save_step_checkpoint(
                 total_step, is_best=True, skip_model_file=True)
 
+    def _record_val_history(
+        self, epoch: int, total_step: int,
+        val_auc: float, val_logloss: float,
+    ) -> None:
+        """Append this epoch's val metrics to ``save_dir/val_history.json``
+        so a post-training script can pick top-K epochs by val AUC for
+        ensemble bundling (exp/v9-mixed-dpe-recency-snapshot)."""
+        import json as _json
+        path = os.path.join(self.save_dir, 'val_history.json')
+        history = []
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    history = _json.load(f)
+            except (ValueError, OSError):
+                history = []
+        history.append({
+            'epoch': int(epoch),
+            'global_step': int(total_step),
+            'val_auc': float(val_auc),
+            'val_logloss': float(val_logloss),
+        })
+        with open(path, 'w') as f:
+            _json.dump(history, f, indent=2)
+
     def _save_epoch_checkpoint(self, epoch: int, total_step: int) -> None:
         """Save a self-contained checkpoint for *this* epoch, regardless of
         whether it is the best-val epoch.
@@ -462,6 +487,10 @@ class PCVRHyFormerRankingTrainer:
                 self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
 
             self._handle_validation_result(total_step, val_auc, val_logloss)
+
+            # Record per-epoch val metrics so the snapshot-ensemble bundler
+            # can pick the top-K epochs by val_auc.
+            self._record_val_history(epoch, total_step, val_auc, val_logloss)
 
             # Persist this epoch's weights so any epoch (not just best-val)
             # can be submitted to the real test platform. Done before the

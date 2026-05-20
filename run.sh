@@ -37,7 +37,22 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --pairwise_lambda 0.05 \
     --additive_dense_fids 61 \
     --gating_dense_fids 87 \
+    --num_epochs 10 \
+    --patience 10 \
     "$@"
+
+# ---- Snapshot ensemble: bundle top-3 val-AUC epochs into one model.pt ----
+# Reads ${TRAIN_CKPT_PATH}/val_history.json (written per-epoch by trainer),
+# picks the 3 epochs with the highest val_auc, loads each epoch's saved
+# state_dict, and writes them into a single ensemble bundle at
+# ${TRAIN_CKPT_PATH}/ensemble_top3/model.pt + sidecars. The submission target
+# is that bundle directory; infer.py auto-detects the ensemble marker and
+# averages probabilities across the 3 members.
+TRAIN_CKPT_DIR="${TRAIN_CKPT_PATH:-./checkpoints}"
+python3 -u "${SCRIPT_DIR}/build_snapshot_ensemble.py" \
+    --ckpt_dir "${TRAIN_CKPT_DIR}" \
+    --top_k 3 \
+    --out_subdir ensemble_top3
 
 # ---- Alternative config: GroupNSTokenizer driven by ns_groups.json ----
 # Uses feature grouping from ns_groups.json (7 user groups + 4 item groups).
