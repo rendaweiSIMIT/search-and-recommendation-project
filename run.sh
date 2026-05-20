@@ -37,8 +37,8 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --pairwise_lambda 0.05 \
     --additive_dense_fids 61 \
     --gating_dense_fids 87 \
-    --num_epochs 10 \
-    --patience 10 \
+    --num_epochs 12 \
+    --patience 12 \
     "$@"
 
 # ---- Snapshot ensemble: bundle top-3 val-AUC epochs into one model.pt ----
