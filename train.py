@@ -488,6 +488,7 @@ def main() -> None:
         "gating_dense_offsets": _resolve_dense_fid_offsets(
             pcvr_dataset, args.gating_dense_fids, '--gating_dense_fids'),
         "recency_dim": pcvr_dataset.recency_dim,
+        "agg_dim": pcvr_dataset.agg_dim,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
