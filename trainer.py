@@ -41,7 +41,7 @@ class PCVRHyFormerRankingTrainer:
         self,
         model: nn.Module,
         train_loader: DataLoader,
-        valid_loader: DataLoader,
+        valid_loader: Optional[DataLoader],
         lr: float,
         num_epochs: int,
         device: str,
@@ -71,7 +71,10 @@ class PCVRHyFormerRankingTrainer:
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
-        self.valid_loader: DataLoader = valid_loader
+        # valid_loader is None in no-val / full-data mode (valid_ratio<=0):
+        # the trainer then skips evaluate() and EarlyStopping, trains a
+        # fixed num_epochs, and relies on the per-epoch checkpoints.
+        self.valid_loader: Optional[DataLoader] = valid_loader
         self.writer = writer
         # schema_path is copied alongside every checkpoint so that infer.py can
         # rebuild the exact same feature schema the model was trained with.
@@ -157,6 +160,11 @@ class PCVRHyFormerRankingTrainer:
                      f"pairwise_lambda={pairwise_lambda}, "
                      f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}, "
                      f"precision={self.precision}")
+        if self.valid_loader is None:
+            logging.info(
+                f"NO-VAL MODE: full-data training, no validation / no "
+                f"EarlyStopping. Will train exactly num_epochs={num_epochs} "
+                f"and save one checkpoint per epoch.")
 
     def _configure_precision(self, precision: str) -> None:
         """Configure autocast precision.
@@ -430,8 +438,11 @@ class PCVRHyFormerRankingTrainer:
 
                 train_pbar.set_postfix({"loss": f"{loss:.4f}"})
 
-                # Step-level validation (only when eval_every_n_steps > 0).
-                if self.eval_every_n_steps > 0 and total_step % self.eval_every_n_steps == 0:
+                # Step-level validation (only when eval_every_n_steps > 0
+                # and a validation loader exists; no-val mode skips this).
+                if (self.valid_loader is not None
+                        and self.eval_every_n_steps > 0
+                        and total_step % self.eval_every_n_steps == 0):
                     logging.info(f"Evaluating at step {total_step}")
                     val_auc, val_logloss = self.evaluate(epoch=epoch)
                     self.model.train()
@@ -451,24 +462,28 @@ class PCVRHyFormerRankingTrainer:
 
             logging.info(f"Epoch {epoch}, Average Loss: {loss_sum / len(self.train_loader)}")
 
-            val_auc, val_logloss = self.evaluate(epoch=epoch)
-            self.model.train()
-            torch.cuda.empty_cache()
+            # Validation + EarlyStopping. Skipped entirely in no-val mode
+            # (valid_loader is None): training then runs the full num_epochs.
+            if self.valid_loader is not None:
+                val_auc, val_logloss = self.evaluate(epoch=epoch)
+                self.model.train()
+                torch.cuda.empty_cache()
 
-            logging.info(f"Epoch {epoch} Validation | AUC: {val_auc}, LogLoss: {val_logloss}")
+                logging.info(f"Epoch {epoch} Validation | AUC: {val_auc}, LogLoss: {val_logloss}")
 
-            if self.writer:
-                self.writer.add_scalar('AUC/valid', val_auc, total_step)
-                self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
+                if self.writer:
+                    self.writer.add_scalar('AUC/valid', val_auc, total_step)
+                    self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
 
-            self._handle_validation_result(total_step, val_auc, val_logloss)
+                self._handle_validation_result(total_step, val_auc, val_logloss)
 
             # Persist this epoch's weights so any epoch (not just best-val)
             # can be submitted to the real test platform. Done before the
-            # early-stop break so the final epoch is captured too.
+            # early-stop break so the final epoch is captured too. In no-val
+            # mode this is the only checkpoint write per epoch.
             self._save_epoch_checkpoint(epoch, total_step)
 
-            if self.early_stopping.early_stop:
+            if self.valid_loader is not None and self.early_stopping.early_stop:
                 logging.info(f"Early stopping at epoch {epoch}")
                 break
 

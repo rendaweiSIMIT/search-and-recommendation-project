@@ -2,14 +2,18 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- exp/v9-mixed: v9 full-stack + our exp/pretrained-mixed +0.0039 winner ----
-# Everything from v9's run.sh, unchanged, PLUS the two pretrained-embedding
-# integration paths from our exp/pretrained-mixed branch:
-#   --additive_dense_fids 61   user_dense_61 (Meta SUM)   -> additive residual
-#   --gating_dense_fids   87   user_dense_87 (Tencent LFM) -> 2*sigmoid gate
-# These operate on the pooled output right before the classifier and are
-# orthogonal to v9 (v9's UserSparseDensePair only covers fids 62-66, never
-# 61/87).
+# ---- exp/v9-mixed-dpe-recency-full8 ----
+# = exp/v9-mixed-dpe-recency (v9 full-stack + pretrained-mixed + C5
+#   dense-proj-exclude + recency NS-token features), retrained on 100% of
+#   the data with NO validation split, fixed 8 epochs.
+#   --valid_ratio 0  -> get_pcvr_data uses every Row Group for training and
+#                       returns valid_loader=None; the trainer then skips
+#                       evaluate()/EarlyStopping.
+#   --num_epochs 8   -> fixed epoch count (mandatory: no early stopping).
+#                       Every epoch's weights are saved (.epochN dirs); pick
+#                       the epoch that scores best on the real test platform.
+# Sibling branch exp/v9-mixed-dpe-recency-full12 is identical but 12 epochs.
+# Full-data no-val mechanism cherry-picked verbatim from commit 438e5e8.
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 3 \
@@ -28,6 +32,8 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --use_temporal_bias \
     --use_time_gap \
     --precision bf16 \
+    --valid_ratio 0 \
+    --num_epochs 8 \
     --lr_schedule cosine \
     --warmup_steps 500 \
     --ema_decay 0.999 \
