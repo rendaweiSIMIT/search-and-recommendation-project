@@ -118,6 +118,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--num_epochs', type=int, default=999,
                         help='Maximum number of training epochs '
                              '(typically terminated earlier by early stopping)')
+    parser.add_argument('--lr_total_epochs', type=int, default=None,
+                        help='Epoch count used ONLY to size the cosine LR '
+                             'schedule (est_total_steps). Defaults to '
+                             '--num_epochs. Set it to decouple LR-schedule '
+                             'length from the actual training length, e.g. '
+                             '--num_epochs 8 --lr_total_epochs 999 trains 8 '
+                             'epochs but keeps the full 999-epoch cosine curve '
+                             'so every step has the same LR as the baseline.')
     parser.add_argument('--patience', type=int, default=5,
                         help='Early-stopping patience '
                              '(number of validations without improvement)')
@@ -540,6 +548,7 @@ def main() -> None:
         train_config=vars(args),
         warmup_steps=args.warmup_steps,
         lr_schedule=args.lr_schedule,
+        lr_total_epochs=args.lr_total_epochs,
         ema_decay=args.ema_decay,
         label_smoothing=args.label_smoothing,
         weight_decay=args.weight_decay,

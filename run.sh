@@ -2,14 +2,19 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-# ---- exp/v9-mixed: v9 full-stack + our exp/pretrained-mixed +0.0039 winner ----
-# Everything from v9's run.sh, unchanged, PLUS the two pretrained-embedding
-# integration paths from our exp/pretrained-mixed branch:
-#   --additive_dense_fids 61   user_dense_61 (Meta SUM)   -> additive residual
-#   --gating_dense_fids   87   user_dense_87 (Tencent LFM) -> 2*sigmoid gate
-# These operate on the pooled output right before the classifier and are
-# orthogonal to v9 (v9's UserSparseDensePair only covers fids 62-66, never
-# 61/87).
+# ---- exp/v9-mixed-dpe-recency-tprofile-snapshot ----
+# = exp/v9-mixed-dpe-recency-tprofile (test-best 0.828098 @ epoch 6), trained
+#   for a FIXED 8 epochs, then epochs 6/7/8 bundled into one snapshot ensemble.
+#
+# The LR is byte-identical to the tprofile baseline -- setting num_epochs does
+# NOT change the learning rate at any step:
+#   --num_epochs 8        the training loop runs exactly 8 epochs
+#   --lr_total_epochs 999 the cosine schedule stays sized for 999 epochs
+#                         (tprofile's default), so the LR at every step equals
+#                         the un-truncated baseline run
+#   --patience 999        EarlyStopping never fires; all 8 epochs are trained
+# Everything else is unchanged from exp/v9-mixed-dpe-recency-tprofile.
+TRAIN_CKPT_DIR="${TRAIN_CKPT_PATH:-./checkpoints}"
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 3 \
@@ -37,7 +42,23 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --pairwise_lambda 0.05 \
     --additive_dense_fids 61 \
     --gating_dense_fids 87 \
+    --num_epochs 8 \
+    --lr_total_epochs 999 \
+    --patience 999 \
     "$@"
+
+# ---- Snapshot ensemble: bundle epochs 6/7/8 into one model.pt ----
+# build_snapshot_ensemble.py reads the per-epoch checkpoints the trainer wrote
+# (global_step*.epoch6/7/8), packs their state_dicts into a single ensemble
+# model.pt, and names the bundle dir
+# global_step*.layer=2.head=4.hidden=64.epoch9 so the platform's checkpoint
+# list shows it -- the list only registers global_step*-pattern dirs, a custom
+# name like ensemble_top3 is silently dropped. infer.py auto-detects the
+# ensemble marker and averages the 3 members' probabilities.
+echo "===== Snapshot ensemble: bundling epochs 6/7/8 ====="
+python3 -u "${SCRIPT_DIR}/build_snapshot_ensemble.py" \
+    --ckpt_dir "${TRAIN_CKPT_DIR}" \
+    --epochs 6 7 8
 
 # ---- Alternative config: GroupNSTokenizer driven by ns_groups.json ----
 # Uses feature grouping from ns_groups.json (7 user groups + 4 item groups).

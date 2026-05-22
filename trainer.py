@@ -63,6 +63,7 @@ class PCVRHyFormerRankingTrainer:
         # --- New training tricks ---
         warmup_steps: int = 0,
         lr_schedule: str = 'none',
+        lr_total_epochs: Optional[int] = None,
         ema_decay: float = 0.0,
         label_smoothing: float = 0.0,
         weight_decay: float = 0.01,
@@ -108,7 +109,13 @@ class PCVRHyFormerRankingTrainer:
         self.lr_schedule = lr_schedule
         self.dense_scheduler: Optional[torch.optim.lr_scheduler.LambdaLR] = None
         if lr_schedule == 'cosine':
-            est_total_steps = num_epochs * len(train_loader)
+            # est_total_steps sizes the cosine curve. It is decoupled from
+            # num_epochs (the actual training-loop length) via lr_total_epochs:
+            # training only N epochs can still ride the exact same cosine curve
+            # as an un-truncated run, so the LR at every step is byte-identical
+            # to the baseline. lr_total_epochs=None keeps the original behavior.
+            sched_epochs = lr_total_epochs if lr_total_epochs is not None else num_epochs
+            est_total_steps = sched_epochs * len(train_loader)
             def _lr_lambda(step: int) -> float:
                 if step < warmup_steps:
                     return step / max(1, warmup_steps)
@@ -117,6 +124,7 @@ class PCVRHyFormerRankingTrainer:
             self.dense_scheduler = torch.optim.lr_scheduler.LambdaLR(
                 self.dense_optimizer, _lr_lambda)
             logging.info(f"LR schedule: cosine, warmup={warmup_steps}, "
+                         f"sched_epochs={sched_epochs} (num_epochs={num_epochs}), "
                          f"est_total_steps={est_total_steps}")
 
         # ---- EMA ----
