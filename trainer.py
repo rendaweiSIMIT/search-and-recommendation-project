@@ -404,6 +404,31 @@ class PCVRHyFormerRankingTrainer:
                 self.ema.restore(self.model)
         logging.info(f"Saved per-epoch checkpoint (epoch {epoch}) to {ckpt_dir}")
 
+    def _record_val_history(
+        self, epoch: int, total_step: int,
+        val_auc: float, val_logloss: float,
+    ) -> None:
+        """Append this epoch's val metrics to ``save_dir/val_history.json``
+        so build_snapshot_ensemble.py can pick the top-K epochs by val AUC.
+        Tolerates a missing or corrupt file by starting a fresh history."""
+        import json
+        path = os.path.join(self.save_dir, 'val_history.json')
+        history = []
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    history = json.load(f)
+            except (ValueError, OSError):
+                history = []
+        history.append({
+            'epoch': int(epoch),
+            'global_step': int(total_step),
+            'val_auc': float(val_auc),
+            'val_logloss': float(val_logloss),
+        })
+        with open(path, 'w') as f:
+            json.dump(history, f, indent=2)
+
     def train(self) -> None:
         """Main training loop: iterates over epochs, performs step-level and
         epoch-level validation, triggers EarlyStopping and the periodic sparse
@@ -462,6 +487,10 @@ class PCVRHyFormerRankingTrainer:
                 self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
 
             self._handle_validation_result(total_step, val_auc, val_logloss)
+
+            # Record per-epoch val metrics so build_snapshot_ensemble.py can
+            # pick the top-K epochs by val_auc for the snapshot ensemble.
+            self._record_val_history(epoch, total_step, val_auc, val_logloss)
 
             # Persist this epoch's weights so any epoch (not just best-val)
             # can be submitted to the real test platform. Done before the
